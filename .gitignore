@@ -1,0 +1,35 @@
+# Build outputs
+/build/
+
+# Build logs
+*.log
+build.log
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.orig
+
+# Temporary files
+*.tmp
+*.temp
+
+# Don't ignore the source directories (they contain the actual sources)
+# but do ignore any extracted tarballs if someone downloads fresh
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.tgz
+*.zip
+

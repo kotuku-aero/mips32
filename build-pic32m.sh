@@ -99,8 +99,8 @@ get_source() {
     fi
 
     # Skip extraction if target already exists and is newer than archive
-    if [ -d "$target_dir" ] && [ "$target_dir" -nt "$archive_file" ]; then
-        log "Using existing ${dir} (newer than archive)"
+    if [ -d "$target_dir" ] ; then
+        log "Using existing ${dir}"
         return 0
     fi
 
@@ -199,7 +199,23 @@ build_gmp() {
     log "Building GMP ${GMP_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" "gmp"
-    
+
+    # GMP - Skip reliability test (line ~7030)
+    if ! grep -q "# PATCHED: Skip reliability test" "${SCRIPT_DIR}/gmp/configure"; then
+        echo "Patching GMP reliability test..."
+        cd "${SCRIPT_DIR}/gmp"
+        sed -i 's/gmp_prog_cc_works="no, long long reliability test 1/# PATCHED: Skip reliability test/' configure
+        echo "  [OK] GMP: Disabled reliability test"
+    fi
+
+    # GMP - mplimb_t is 8
+    if grep -q "Oops, mp_limb_t doesn't seem to work" "${SCRIPT_DIR}/gmp/configure"; then
+      echo "  Patching sizeof(mp_limb_t) to 8 bytes..."
+      cd "${SCRIPT_DIR}/gmp"
+      sed -i "s/.*Oops, mp_limb_t doesn't seem to work.*/ac_cv_sizeof_mp_limb_t=8/" configure
+  		echo "  GMP: Hardcoded mp_limb_t size to 8 bytes";
+    fi
+
     mkdir -p "${BUILDDIR}/gmp"
     cd "${BUILDDIR}/gmp"
     
@@ -276,6 +292,21 @@ build_gcc_stage1() {
     log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler)"
 
     get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
+
+    # Patch to make the gtype-input.list emit Windows specific
+    # paths
+    cd "${SCRIPT_DIR}/gcc/gcc"
+
+    # the gentype.exe program can't handle /c/<some path>/../<some file>
+    # so change it to C:/<some path> in the file ./build/gcc-stage1/gcc/gtyp-input.list
+    # Using sed to patch Makefile.in in place:
+    sed -i '/^s-gtyp-input: Makefile$/,/$(STAMP) s-gtyp-input$/{
+        /$(SHELL) $(srcdir)\/\.\.\/move-if-change tmp-gi.list gtyp-input.list/i\
+    	sed '"'"'s|^/\\([a-z]\\)/|\\U\\1:/|'"'"' tmp-gi.list > tmp-gi-win.list
+        s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
+    }' Makefile.in
+
+    cd "${SCRIPT-DIR}"
     
     # GCC needs to find the newly built binutils
     export PATH="${PREFIX}/bin:${PATH}"

@@ -6,6 +6,9 @@
 # mips-elf (PIC32) processors. It produces native Windows executables
 # when run under MSYS2 UCRT64.
 #
+# The script automatically tracks completed stages and resumes from
+# the last successful stage on re-run.
+#
 # Environment variables:
 #   PREFIX      - Installation prefix (default: /c/pic32)
 #   JOBS        - Parallel build jobs (default: nproc)
@@ -16,10 +19,10 @@
 #   NEWLIB_NANO - Build newlib-nano variant: yes/no (default: yes)
 #
 # Usage:
-#   ./build-pic32m.sh                    # Standard build
+#   ./build-pic32m.sh                    # Standard build (resumes if interrupted)
 #   PREFIX=/c/my-tools ./build-pic32m.sh # Custom prefix
 #   GDB_PYTHON=yes ./build-pic32m.sh     # With Python support
-#   CLEAN=yes ./build-pic32m.sh          # Clean build
+#   CLEAN=yes ./build-pic32m.sh          # Clean build (starts from scratch)
 #
 
 set -e  # Exit on error
@@ -47,6 +50,7 @@ export JOBS="${JOBS:-$(nproc)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDDIR="${SCRIPT_DIR}/build"
 STAGING="${BUILDDIR}/staging"
+STAGE_FILE="${BUILDDIR}/.build-stage"
 
 # GDB Python support (default: disabled for portability)
 GDB_PYTHON="${GDB_PYTHON:-no}"
@@ -59,6 +63,77 @@ NEWLIB_NANO="${NEWLIB_NANO:-yes}"
 
 # Skip to stage (for resuming failed builds)
 SKIP_TO="${SKIP_TO:-}"
+
+# Define build stages in order
+STAGES=(
+    "gmp"
+    "mpfr"
+    "mpc"
+    "binutils"
+    "gcc-stage1"
+    "newlib"
+    "gcc-stage2"
+    "gdb"
+)
+
+#-----------------------------------------------------------------------------
+# Stage Tracking Functions
+#-----------------------------------------------------------------------------
+
+# Find index of a stage name, returns -1 if not found
+find_stage_index() {
+    local name="$1"
+    for ((i = 0; i < ${#STAGES[@]}; i++)); do
+        if [[ "${STAGES[i]}" == "${name}" ]]; then
+            echo "$i"
+            return
+        fi
+    done
+    echo "-1"
+}
+
+# Read the last completed stage and return its index
+get_completed_stage_index() {
+    if [[ -f "${STAGE_FILE}" ]]; then
+        local completed_stage=$(cat "${STAGE_FILE}")
+        local idx=$(find_stage_index "${completed_stage}")
+        echo "$idx"
+    else
+        echo "-1"
+    fi
+}
+
+# Mark a stage as completed
+mark_stage_complete() {
+    local stage="$1"
+    echo "${stage}" > "${STAGE_FILE}"
+}
+
+# Check if a stage should be skipped (already completed)
+stage_completed() {
+    local stage="$1"
+    local stage_idx=$(find_stage_index "${stage}")
+    local completed_idx=$(get_completed_stage_index)
+    
+    if [[ ${stage_idx} -le ${completed_idx} ]]; then
+        return 0  # Already completed
+    fi
+    return 1  # Not completed
+}
+
+# Show completed stages
+show_completed_stages() {
+    local completed_idx=$(get_completed_stage_index)
+    
+    if [[ ${completed_idx} -ge 0 ]]; then
+        echo "=== Previously completed stages ==="
+        for ((i = 0; i <= completed_idx && i < ${#STAGES[@]}; i++)); do
+            echo "  [OK] Stage $((i + 1))/${#STAGES[@]}: ${STAGES[i]}"
+        done
+        echo "==================================="
+        echo ""
+    fi
+}
 
 #-----------------------------------------------------------------------------
 # Utility Functions
@@ -98,7 +173,7 @@ get_source() {
         exit 1
     fi
 
-    # Skip extraction if target already exists and is newer than archive
+    # Skip extraction if target already exists
     if [ -d "$target_dir" ] ; then
         log "Using existing ${dir}"
         return 0
@@ -167,35 +242,18 @@ check_prerequisites() {
     echo "All prerequisites satisfied"
 }
 
-should_skip() {
-    local stage="$1"
-    local stages="gmp mpfr mpc binutils gcc-stage1 newlib gcc-stage2 gdb"
-    
-    if [ -z "$SKIP_TO" ]; then
-        return 1  # Don't skip
-    fi
-    
-    # Check if we've reached the skip target
-    for s in $stages; do
-        if [ "$s" == "$SKIP_TO" ]; then
-            SKIP_TO=""  # Clear so subsequent stages run
-            return 1    # Don't skip this one
-        fi
-        if [ "$s" == "$stage" ]; then
-            echo "Skipping $stage (SKIP_TO=$SKIP_TO)"
-            return 0    # Skip
-        fi
-    done
-    
-    return 1
-}
-
 #-----------------------------------------------------------------------------
 # Build Functions
 #-----------------------------------------------------------------------------
 
 build_gmp() {
-    should_skip "gmp" && return 0
+    local stage="gmp"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building GMP ${GMP_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" "gmp"
@@ -208,12 +266,12 @@ build_gmp() {
         echo "  [OK] GMP: Disabled reliability test"
     fi
 
-    # GMP - mplimb_t is 8
+    # GMP - mp_limb_t is 8
     if grep -q "Oops, mp_limb_t doesn't seem to work" "${SCRIPT_DIR}/gmp/configure"; then
-      echo "  Patching sizeof(mp_limb_t) to 8 bytes..."
-      cd "${SCRIPT_DIR}/gmp"
-      sed -i "s/.*Oops, mp_limb_t doesn't seem to work.*/ac_cv_sizeof_mp_limb_t=8/" configure
-  		echo "  GMP: Hardcoded mp_limb_t size to 8 bytes";
+        echo "  Patching sizeof(mp_limb_t) to 8 bytes..."
+        cd "${SCRIPT_DIR}/gmp"
+        sed -i "s/.*Oops, mp_limb_t doesn't seem to work.*/ac_cv_sizeof_mp_limb_t=8/" configure
+        echo "  GMP: Hardcoded mp_limb_t size to 8 bytes"
     fi
 
     mkdir -p "${BUILDDIR}/gmp"
@@ -226,10 +284,18 @@ build_gmp() {
     
     make -j${JOBS}
     make install
+    
+    mark_stage_complete "${stage}"
 }
 
 build_mpfr() {
-    should_skip "mpfr" && return 0
+    local stage="mpfr"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building MPFR ${MPFR_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VERSION}.tar.xz" "mpfr"
@@ -245,10 +311,18 @@ build_mpfr() {
     
     make -j${JOBS}
     make install
+    
+    mark_stage_complete "${stage}"
 }
 
 build_mpc() {
-    should_skip "mpc" && return 0
+    local stage="mpc"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building MPC ${MPC_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.gz" "mpc"
@@ -265,10 +339,18 @@ build_mpc() {
     
     make -j${JOBS}
     make install
+    
+    mark_stage_complete "${stage}"
 }
 
 build_binutils() {
-    should_skip "binutils" && return 0
+    local stage="binutils"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building Binutils ${BINUTILS_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
@@ -288,7 +370,6 @@ build_binutils() {
 }
 
 build_gcc_stage1() {
-    should_skip "gcc-stage1" && return 0
     log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler)"
 
     get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
@@ -333,10 +414,17 @@ build_gcc_stage1() {
     
     make -j${JOBS} all-gcc
     make install-gcc
+    
+    mark_stage_complete "${stage}"
 }
 
 build_newlib() {
-    should_skip "newlib" && return 0
+    local stage="newlib"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
     
     log "Building Newlib ${NEWLIB_VERSION}"
 
@@ -376,10 +464,18 @@ build_newlib() {
     
     make -j${JOBS}
     make install
+    
+    mark_stage_complete "${stage}"
 }
 
 build_gcc_stage2() {
-    should_skip "gcc-stage2" && return 0
+    local stage="gcc-stage2"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building GCC ${GCC_VERSION} Stage 2 (with newlib support)"
     
     # GCC needs to find binutils and stage1 compiler
@@ -406,10 +502,18 @@ build_gcc_stage2() {
     
     make -j${JOBS} all-gcc all-target-libgcc
     make install-gcc install-target-libgcc
+    
+    mark_stage_complete "${stage}"
 }
 
 build_gdb() {
-    should_skip "gdb" && return 0
+    local stage="gdb"
+    
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+    
     log "Building GDB ${GDB_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" "gdb"
@@ -436,6 +540,8 @@ build_gdb() {
     
     make -j${JOBS}
     make install
+    
+    mark_stage_complete "${stage}"
 }
 
 copy_runtime_dlls() {
@@ -574,7 +680,6 @@ main() {
     echo "  GDB_PYTHON:  ${GDB_PYTHON}"
     echo "  PORTABLE:    ${PORTABLE}"
     echo "  NEWLIB_NANO: ${NEWLIB_NANO}"
-    echo "  SKIP_TO:     ${SKIP_TO:-<none>}"
     echo ""
     echo "Source versions:"
     echo "  GMP:      ${GMP_VERSION}"
@@ -592,12 +697,33 @@ main() {
     if [ "${CLEAN}" == "yes" ]; then
         log "Cleaning build directory"
         rm -rf "${BUILDDIR}"
+        rm -rf "${PREFIX}"
     fi
     
     # Create directories
     mkdir -p "${BUILDDIR}"
     mkdir -p "${STAGING}"
     mkdir -p "${PREFIX}"
+    
+    # Show what's already done
+    show_completed_stages
+    
+    # Handle SKIP_TO override (forces restart from a specific stage)
+    if [ -n "${SKIP_TO}" ]; then
+        local skip_idx=$(find_stage_index "${SKIP_TO}")
+        if [ ${skip_idx} -ge 0 ]; then
+            echo "SKIP_TO=${SKIP_TO} specified, will resume from stage $((skip_idx + 1))"
+            # Set stage file to one before the requested stage
+            if [ ${skip_idx} -eq 0 ]; then
+                rm -f "${STAGE_FILE}"
+            else
+                echo "${STAGES[$((skip_idx - 1))]}" > "${STAGE_FILE}"
+            fi
+        else
+            echo "WARNING: Unknown stage '${SKIP_TO}', ignoring SKIP_TO"
+        fi
+        echo ""
+    fi
     
     # Build stages (two-stage GCC build for newlib)
     build_gmp

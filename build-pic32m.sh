@@ -25,6 +25,18 @@
 set -e  # Exit on error
 
 #-----------------------------------------------------------------------------
+# Source Versions - Update these when new versions are released
+#-----------------------------------------------------------------------------
+
+GMP_VERSION="6.3.0"
+MPFR_VERSION="4.2.2"
+MPC_VERSION="1.3.1"
+BINUTILS_VERSION="2.44"
+GCC_VERSION="15.2.0"
+NEWLIB_VERSION="4.5.0.20241231"
+GDB_VERSION="16.2"
+
+#-----------------------------------------------------------------------------
 # Configuration
 #-----------------------------------------------------------------------------
 
@@ -60,12 +72,73 @@ log() {
     echo ""
 }
 
+get_source() {
+    local url="$1"   # url to fetch
+    local dir="$2"   # target directory name (e.g., "binutils")
+
+    local SOURCES="${SCRIPT_DIR}/sources"
+    local temp_dir="${SCRIPT_DIR}/temp_extract"
+    local target_dir="${SCRIPT_DIR}/${dir}"
+
+    mkdir -p "${SOURCES}"
+
+    # Download if not already present
+    local filename=$(basename "$url")
+    if [ ! -f "${SOURCES}/${filename}" ]; then
+        log "Downloading ${filename}"
+        wget -P "${SOURCES}" "$url"
+    else
+        log "Using cached ${filename}"
+    fi
+
+    local archive_file="${SOURCES}/${filename}"
+
+    if [ ! -f "$archive_file" ]; then
+        echo "Error: Download failed - ${archive_file} not found"
+        exit 1
+    fi
+
+    # Skip extraction if target already exists and is newer than archive
+    if [ -d "$target_dir" ] && [ "$target_dir" -nt "$archive_file" ]; then
+        log "Using existing ${dir} (newer than archive)"
+        return 0
+    fi
+
+    log "Extracting ${dir} from ${filename}"
+
+    # Clean up any previous extraction
+    rm -rf "$temp_dir"
+    mkdir -p "$temp_dir"
+
+    tar -xf "$archive_file" -C "$temp_dir"
+
+    # Find the extracted directory (e.g., binutils-2.45)
+    local extracted_dir=$(find "$temp_dir" -maxdepth 1 -mindepth 1 -type d | head -n 1)
+
+    if [ -z "$extracted_dir" ]; then
+        echo "Error: Could not find extracted directory in ${temp_dir}"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+
+    log "Found extracted directory: $(basename "$extracted_dir")"
+
+    # Remove old target and move extracted source
+    rm -rf "$target_dir"
+    mv "$extracted_dir" "$target_dir"
+
+    # Clean up
+    rm -rf "$temp_dir"
+
+    log "Source ready at ${target_dir}"
+}
+
 check_prerequisites() {
     log "Checking prerequisites"
     
     local missing=()
     
-    for cmd in gcc g++ make bison flex makeinfo; do
+    for cmd in gcc g++ make bison flex makeinfo wget; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -75,7 +148,7 @@ check_prerequisites() {
         echo "ERROR: Missing required tools: ${missing[*]}"
         echo ""
         echo "Install with:"
-        echo "  pacman -S base-devel mingw-w64-ucrt-x86_64-toolchain texinfo bison flex"
+        echo "  pacman -S base-devel mingw-w64-ucrt-x86_64-toolchain texinfo bison flex wget"
         exit 1
     fi
     
@@ -90,20 +163,7 @@ check_prerequisites() {
             exit 1
         fi
     fi
-    
-    # Check for newlib source
-    if [ ! -d "${SCRIPT_DIR}/newlib" ]; then
-        echo "WARNING: newlib source not found at ${SCRIPT_DIR}/newlib"
-        echo "         Download from: https://sourceware.org/newlib/"
-        echo "         Or: git clone git://sourceware.org/git/newlib-cygwin.git newlib"
-        echo ""
-        read -p "Continue without newlib? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-    
+
     echo "All prerequisites satisfied"
 }
 
@@ -136,7 +196,9 @@ should_skip() {
 
 build_gmp() {
     should_skip "gmp" && return 0
-    log "Building GMP"
+    log "Building GMP ${GMP_VERSION}"
+
+    get_source "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" "gmp"
     
     mkdir -p "${BUILDDIR}/gmp"
     cd "${BUILDDIR}/gmp"
@@ -152,7 +214,9 @@ build_gmp() {
 
 build_mpfr() {
     should_skip "mpfr" && return 0
-    log "Building MPFR"
+    log "Building MPFR ${MPFR_VERSION}"
+
+    get_source "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VERSION}.tar.xz" "mpfr"
     
     mkdir -p "${BUILDDIR}/mpfr"
     cd "${BUILDDIR}/mpfr"
@@ -169,7 +233,9 @@ build_mpfr() {
 
 build_mpc() {
     should_skip "mpc" && return 0
-    log "Building MPC"
+    log "Building MPC ${MPC_VERSION}"
+
+    get_source "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.gz" "mpc"
     
     mkdir -p "${BUILDDIR}/mpc"
     cd "${BUILDDIR}/mpc"
@@ -187,8 +253,10 @@ build_mpc() {
 
 build_binutils() {
     should_skip "binutils" && return 0
-    log "Building Binutils"
-    
+    log "Building Binutils ${BINUTILS_VERSION}"
+
+    get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
+
     mkdir -p "${BUILDDIR}/binutils"
     cd "${BUILDDIR}/binutils"
     
@@ -205,7 +273,9 @@ build_binutils() {
 
 build_gcc_stage1() {
     should_skip "gcc-stage1" && return 0
-    log "Building GCC Stage 1 (bootstrap compiler)"
+    log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler)"
+
+    get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
     
     # GCC needs to find the newly built binutils
     export PATH="${PREFIX}/bin:${PATH}"
@@ -237,8 +307,10 @@ build_gcc_stage1() {
 build_newlib() {
     should_skip "newlib" && return 0
     
-    log "Building Newlib"
-    
+    log "Building Newlib ${NEWLIB_VERSION}"
+
+    get_source "https://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz" "newlib"
+
     # Ensure the stage1 compiler is in PATH
     export PATH="${PREFIX}/bin:${PATH}"
     
@@ -277,7 +349,7 @@ build_newlib() {
 
 build_gcc_stage2() {
     should_skip "gcc-stage2" && return 0
-    log "Building GCC Stage 2 (with newlib support)"
+    log "Building GCC ${GCC_VERSION} Stage 2 (with newlib support)"
     
     # GCC needs to find binutils and stage1 compiler
     export PATH="${PREFIX}/bin:${PATH}"
@@ -307,8 +379,10 @@ build_gcc_stage2() {
 
 build_gdb() {
     should_skip "gdb" && return 0
-    log "Building GDB"
-    
+    log "Building GDB ${GDB_VERSION}"
+
+    get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" "gdb"
+
     mkdir -p "${BUILDDIR}/gdb"
     cd "${BUILDDIR}/gdb"
     
@@ -385,13 +459,13 @@ verify_build() {
     for tool in "${tools[@]}"; do
         local path="${PREFIX}/bin/${tool}.exe"
         if [ -f "$path" ]; then
-            echo "✓ ${tool}"
+            echo "[OK] ${tool}"
             # Try to run it
             if ! "${path}" --version > /dev/null 2>&1; then
-                echo "  WARNING: ${tool} exists but failed to run"
+                echo "     WARNING: ${tool} exists but failed to run"
             fi
         else
-            echo "✗ ${tool} NOT FOUND"
+            echo "[MISSING] ${tool}"
             all_ok=false
         fi
     done
@@ -399,14 +473,14 @@ verify_build() {
     # Check for newlib
     echo ""
     if [ -f "${PREFIX}/${TARGET}/lib/libc.a" ]; then
-        echo "✓ newlib (libc.a)"
+        echo "[OK] newlib (libc.a)"
     else
-        echo "✗ newlib NOT FOUND"
+        echo "[MISSING] newlib"
         all_ok=false
     fi
     
     if [ -f "${PREFIX}/${TARGET}/lib/libm.a" ]; then
-        echo "✓ newlib math (libm.a)"
+        echo "[OK] newlib math (libm.a)"
     fi
     
     echo ""
@@ -433,8 +507,14 @@ print_summary() {
     echo ""
     echo "Windows path: $(cygpath -w "${PREFIX}")"
     echo ""
+    echo "Component versions:"
+    echo "  GCC:      ${GCC_VERSION}"
+    echo "  Binutils: ${BINUTILS_VERSION}"
+    echo "  Newlib:   ${NEWLIB_VERSION}"
+    echo "  GDB:      ${GDB_VERSION}"
+    echo ""
     echo "Contents:"
-    echo "  ${PREFIX}/bin/          - Cross-compiler tools"
+    echo "  ${PREFIX}/bin/              - Cross-compiler tools"
     echo "  ${PREFIX}/${TARGET}/lib/    - Runtime libraries (newlib)"
     echo "  ${PREFIX}/${TARGET}/include - C library headers"
     echo ""
@@ -464,6 +544,15 @@ main() {
     echo "  PORTABLE:    ${PORTABLE}"
     echo "  NEWLIB_NANO: ${NEWLIB_NANO}"
     echo "  SKIP_TO:     ${SKIP_TO:-<none>}"
+    echo ""
+    echo "Source versions:"
+    echo "  GMP:      ${GMP_VERSION}"
+    echo "  MPFR:     ${MPFR_VERSION}"
+    echo "  MPC:      ${MPC_VERSION}"
+    echo "  Binutils: ${BINUTILS_VERSION}"
+    echo "  GCC:      ${GCC_VERSION}"
+    echo "  Newlib:   ${NEWLIB_VERSION}"
+    echo "  GDB:      ${GDB_VERSION}"
     echo ""
     
     check_prerequisites

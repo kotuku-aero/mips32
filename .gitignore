@@ -1,6 +1,16 @@
 # Build outputs
 /build/
 
+# extracted upstream source files
+/binutils/
+/gcc/
+/gdb/
+/gmp/
+/mpc/
+/mpfr/
+/newlib/
+/sources/
+
 # Build logs
 *.log
 build.log

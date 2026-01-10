@@ -157,8 +157,8 @@ And a special acknowledgement to Claude itself. This document, like much of the 
 
 The toolchain and build system are available at:
 
-- **Build Scripts**: https://gitea.kotuku.aero/kotuku/mips32
-- **Pre-built Toolchain**: https://gitea.kotuku.aero/kotuku/pic32
+- **Build Scripts**: https://github.com/kotuku-aero/mips32
+- **Pre-built Toolchain**: https://github.com/kotuku-aero/pic32
 
 Both repositories are public. Use them, learn from them, improve them.
 

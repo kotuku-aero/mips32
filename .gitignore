@@ -10,6 +10,7 @@
 /mpfr/
 /newlib/
 /sources/
+/releases/
 
 # Build logs
 *.log
@@ -43,4 +44,3 @@ desktop.ini
 *.tgz
 *.zip
 
-/releases

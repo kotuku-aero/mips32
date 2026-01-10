@@ -671,7 +671,7 @@ create_release_archive() {
         return 0
     fi
 
-    log "Creating release archive"
+    log "Creating release archives"
 
     mkdir -p "${RELEASES_DIR}"
 
@@ -681,40 +681,67 @@ create_release_archive() {
         platform="linux-x64"
     fi
 
-    # Archive filename
+    # Archive filename (without extension)
     local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
-    local archive_path="${RELEASES_DIR}/${archive_name}.tar.xz"
 
     # Get the base name of PREFIX (e.g., "pic32" from "/c/pic32")
     local prefix_basename=$(basename "${PREFIX}")
     local prefix_parent=$(dirname "${PREFIX}")
 
-    echo "Creating ${archive_name}.tar.xz ..."
+    echo "Creating release archives..."
     echo "  Source: ${PREFIX}"
-    echo "  Output: ${archive_path}"
+    echo "  Output: ${RELEASES_DIR}/"
+    echo ""
 
-    # Create the archive
-    # We cd to the parent directory and archive the basename to get clean paths
+    # Change to parent directory for clean archive paths
     cd "${prefix_parent}"
 
-    # Use tar with xz compression
-    # The archive will contain "pic32/bin", "pic32/lib", etc.
-    tar -cJf "${archive_path}" "${prefix_basename}"
+    # -------------------------------------------------------------------------
+    # Create .tar.xz archive (smaller, for Linux users and archival)
+    # -------------------------------------------------------------------------
+    local tarxz_path="${RELEASES_DIR}/${archive_name}.tar.xz"
+    echo "Creating ${archive_name}.tar.xz ..."
+    tar -cJf "${tarxz_path}" "${prefix_basename}"
+    local tarxz_size=$(du -h "${tarxz_path}" | cut -f1)
+    echo "  [OK] ${tarxz_size}"
 
-    # Calculate size
-    local archive_size=$(du -h "${archive_path}" | cut -f1)
-
-    echo ""
-    echo "Release archive created:"
-    echo "  File: ${archive_path}"
-    echo "  Size: ${archive_size}"
-
-    # Create checksum
+    # Create checksum for tar.xz
     cd "${RELEASES_DIR}"
     sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
-    echo "  SHA256: $(cat "${archive_name}.tar.xz.sha256")"
 
-    # Create a version info file
+    # -------------------------------------------------------------------------
+    # Create .zip archive (easier to extract on Windows)
+    # -------------------------------------------------------------------------
+    cd "${prefix_parent}"
+    local zip_path="${RELEASES_DIR}/${archive_name}.zip"
+    echo "Creating ${archive_name}.zip ..."
+
+    # Use zip if available, otherwise fall back to 7z, otherwise skip
+    if command -v zip &> /dev/null; then
+        zip -rq "${zip_path}" "${prefix_basename}"
+        local zip_size=$(du -h "${zip_path}" | cut -f1)
+        echo "  [OK] ${zip_size}"
+
+        # Create checksum for zip
+        cd "${RELEASES_DIR}"
+        sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
+    elif command -v 7z &> /dev/null; then
+        7z a -tzip -mx=5 -bso0 -bsp0 "${zip_path}" "${prefix_basename}"
+        local zip_size=$(du -h "${zip_path}" | cut -f1)
+        echo "  [OK] ${zip_size}"
+
+        # Create checksum for zip
+        cd "${RELEASES_DIR}"
+        sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
+    else
+        echo "  [SKIP] Neither 'zip' nor '7z' found - install with:"
+        echo "         pacman -S zip"
+        echo "         or: pacman -S p7zip"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Create version info file
+    # -------------------------------------------------------------------------
     cat > "${RELEASES_DIR}/${archive_name}.txt" << EOF
 PIC32 MIPS Toolchain ${TOOLCHAIN_VERSION}
 ==========================================
@@ -737,14 +764,30 @@ Build Configuration:
   GDB Python:  ${GDB_PYTHON}
 
 Installation:
-  1. Extract to C:\\pic32 (Windows) or /c/opt/pic32 (MSYS2)
-  2. Add <install-path>/bin to your PATH
-  3. Test with: mips-elf-gcc --version
+  Windows:
+    1. Extract the .zip file to C:\\pic32
+    2. Add C:\\pic32\\bin to your system PATH
+    3. Open a new Command Prompt and test: mips-elf-gcc --version
+
+  MSYS2/Linux:
+    1. Extract: tar -xJf ${archive_name}.tar.xz -C /c  (or /opt)
+    2. Add to PATH: export PATH="/c/pic32/bin:\$PATH"
+    3. Test: mips-elf-gcc --version
 
 Built with: $(gcc --version | head -1)
+
+Checksums:
+  See ${archive_name}.tar.xz.sha256
+  See ${archive_name}.zip.sha256 (if available)
 EOF
 
-    echo "  Info: ${RELEASES_DIR}/${archive_name}.txt"
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    echo ""
+    echo "Release archives created in ${RELEASES_DIR}:"
+    ls -lh "${RELEASES_DIR}/${archive_name}"* 2>/dev/null
+    echo ""
 
     cd "${SCRIPT_DIR}"
 }

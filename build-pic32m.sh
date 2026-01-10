@@ -367,34 +367,49 @@ build_binutils() {
     
     make -j${JOBS}
     make install
+
+    mark_stage_complete "${stage}"
 }
 
 build_gcc_stage1() {
+    local stage="gcc-stage1"
+
+    if stage_completed "${stage}"; then
+        echo "[OK] Stage: ${stage} (already completed)"
+        return 0
+    fi
+
     log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler)"
 
     get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
 
-    # Patch to make the gtype-input.list emit Windows specific
-    # paths
-    cd "${SCRIPT_DIR}/gcc/gcc"
+    # Patch Makefile.in to fix MSYS2 path conversion for gtyp-input.list
+    # The gentype.exe program can't handle /c/<path> style paths, needs C:/<path>
+    # IMPORTANT: Must use uppercase drive letter to avoid confusion with directory names
+    # e.g., /c/path/c/file.c -> C:/path/c/file.c (not c:/path/c/file.c)
+    if ! grep -q "tmp-gi-win.list" "${SCRIPT_DIR}/gcc/gcc/Makefile.in"; then
+        echo "Patching GCC Makefile.in for MSYS2 path conversion..."
+        cd "${SCRIPT_DIR}/gcc/gcc"
 
-    # the gentype.exe program can't handle /c/<some path>/../<some file>
-    # so change it to C:/<some path> in the file ./build/gcc-stage1/gcc/gtyp-input.list
-    # Using sed to patch Makefile.in in place:
-    sed -i '/^s-gtyp-input: Makefile$/,/$(STAMP) s-gtyp-input$/{
-        /$(SHELL) $(srcdir)\/\.\.\/move-if-change tmp-gi.list gtyp-input.list/i\
-    	sed '"'"'s|^/\\([a-z]\\)/|\\U\\1:/|'"'"' tmp-gi.list > tmp-gi-win.list
-        s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
-    }' Makefile.in
+        # Use awk for reliable uppercase conversion of drive letters
+        # This converts /c/path to C:/path, /d/path to D:/path, etc.
+        sed -i '/move-if-change tmp-gi.list gtyp-input.list/{
+i\
+	awk '"'"'{if(match($$0,/^\\/([a-zA-Z])\\//)){print toupper(substr($$0,2,1))":/"substr($$0,4)}else{print}}'"'"' tmp-gi.list > tmp-gi-win.list
+s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
+}' Makefile.in
 
-    cd "${SCRIPT-DIR}"
-    
+        echo "  [OK] GCC: Patched Makefile.in for Windows paths (uppercase drive letters)"
+    else
+        echo "  [OK] GCC Makefile.in: Already patched"
+    fi
+
     # GCC needs to find the newly built binutils
     export PATH="${PREFIX}/bin:${PATH}"
-    
+
     mkdir -p "${BUILDDIR}/gcc-stage1"
     cd "${BUILDDIR}/gcc-stage1"
-    
+
     "${SCRIPT_DIR}/gcc/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
@@ -411,10 +426,10 @@ build_gcc_stage1() {
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
         --with-mpc="${STAGING}"
-    
+
     make -j${JOBS} all-gcc
     make install-gcc
-    
+
     mark_stage_complete "${stage}"
 }
 
@@ -450,8 +465,9 @@ build_newlib() {
         --enable-lite-exit
         --enable-newlib-global-atexit
         --disable-nls
+        --disable-libgloss
     )
-    
+
     if [ "${NEWLIB_NANO}" == "yes" ]; then
         log "Building Newlib-nano variant"
         newlib_opts+=(
@@ -459,31 +475,31 @@ build_newlib() {
             --disable-newlib-io-float
         )
     fi
-    
+
     "${SCRIPT_DIR}/newlib/configure" "${newlib_opts[@]}"
-    
+
     make -j${JOBS}
     make install
-    
+
     mark_stage_complete "${stage}"
 }
 
 build_gcc_stage2() {
     local stage="gcc-stage2"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building GCC ${GCC_VERSION} Stage 2 (with newlib support)"
-    
+
     # GCC needs to find binutils and stage1 compiler
     export PATH="${PREFIX}/bin:${PATH}"
-    
+
     mkdir -p "${BUILDDIR}/gcc-stage2"
     cd "${BUILDDIR}/gcc-stage2"
-    
+
     "${SCRIPT_DIR}/gcc/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
@@ -499,10 +515,15 @@ build_gcc_stage2() {
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
         --with-mpc="${STAGING}"
-    
-    make -j${JOBS} all-gcc all-target-libgcc
-    make install-gcc install-target-libgcc
-    
+
+    # Build gcc with full parallelism
+    make -j${JOBS} all-gcc
+    make install-gcc
+
+    # Build libgcc with reduced parallelism to avoid MSYS2 process issues
+    make -j2 all-target-libgcc
+    make install-target-libgcc
+
     mark_stage_complete "${stage}"
 }
 

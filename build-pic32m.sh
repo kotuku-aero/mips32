@@ -713,7 +713,7 @@ create_release_archive() {
     cd "${RELEASES_DIR}"
     sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
     echo "  SHA256: $(cat "${archive_name}.tar.xz.sha256")"
-    
+
     # Create a version info file
     cat > "${RELEASES_DIR}/${archive_name}.txt" << EOF
 PIC32 MIPS Toolchain ${TOOLCHAIN_VERSION}
@@ -737,7 +737,7 @@ Build Configuration:
   GDB Python:  ${GDB_PYTHON}
 
 Installation:
-  1. Extract to C:\\pic32 (Windows) or /opt/pic32 (Linux)
+  1. Extract to C:\\pic32 (Windows) or /c/opt/pic32 (MSYS2)
   2. Add <install-path>/bin to your PATH
   3. Test with: mips-elf-gcc --version
 

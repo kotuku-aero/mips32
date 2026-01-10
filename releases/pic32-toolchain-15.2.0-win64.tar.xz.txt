@@ -1,0 +1,25 @@
+PIC32 MIPS Toolchain 15.2.0
+============================
+Build Date 2026-01-11 12:00:00 UTC
+Platform win64
+
+Component Versions:
+  GCC    15.2.0
+  Binutils: 2.43
+  Newlib:   4.4.0
+  GDB:      17.1
+  GMP:      6.3.0
+  MPFR:     4.2.1
+  MPC:      1.3.1
+
+Build Configguration:
+  Target:    mips32-elf
+  Newlib-nano: yes
+  GDB-Python:  no
+
+Installation:
+  1. Extract to C:\pic32 (Windows) or /c/opt/pic32 (MSYS2)
+  2. Add <install-path>/bin to your PATH
+  3. Test with: mips-elf-gcc --version
+
+Built with: gcc.exe (Rev8, Built by MSYS2 project) 15.2.0

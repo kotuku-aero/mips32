@@ -17,12 +17,14 @@
 #   SKIP_TO     - Skip to stage: gmp/mpfr/mpc/binutils/gcc-stage1/newlib/gcc-stage2/gdb
 #   PORTABLE    - Copy runtime DLLs to prefix: yes/no (default: yes)
 #   NEWLIB_NANO - Build newlib-nano variant: yes/no (default: yes)
+#   MAKE_RELEASE - Create release archive: yes/no (default: yes)
 #
 # Usage:
 #   ./build-pic32m.sh                    # Standard build (resumes if interrupted)
 #   PREFIX=/c/my-tools ./build-pic32m.sh # Custom prefix
 #   GDB_PYTHON=yes ./build-pic32m.sh     # With Python support
 #   CLEAN=yes ./build-pic32m.sh          # Clean build (starts from scratch)
+#   MAKE_RELEASE=no ./build-pic32m.sh    # Skip release archive creation
 #
 
 set -e  # Exit on error
@@ -39,6 +41,9 @@ GCC_VERSION="15.2.0"
 NEWLIB_VERSION="4.5.0.20241231"
 GDB_VERSION="16.2"
 
+# Release version string (used for archive naming)
+TOOLCHAIN_VERSION="${GCC_VERSION}"
+
 #-----------------------------------------------------------------------------
 # Configuration
 #-----------------------------------------------------------------------------
@@ -51,6 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDDIR="${SCRIPT_DIR}/build"
 STAGING="${BUILDDIR}/staging"
 STAGE_FILE="${BUILDDIR}/.build-stage"
+RELEASES_DIR="${SCRIPT_DIR}/releases"
 
 # GDB Python support (default: disabled for portability)
 GDB_PYTHON="${GDB_PYTHON:-no}"
@@ -63,6 +69,9 @@ NEWLIB_NANO="${NEWLIB_NANO:-yes}"
 
 # Skip to stage (for resuming failed builds)
 SKIP_TO="${SKIP_TO:-}"
+
+# Create release archive
+MAKE_RELEASE="${MAKE_RELEASE:-yes}"
 
 # Define build stages in order
 STAGES=(
@@ -114,7 +123,7 @@ stage_completed() {
     local stage="$1"
     local stage_idx=$(find_stage_index "${stage}")
     local completed_idx=$(get_completed_stage_index)
-    
+
     if [[ ${stage_idx} -le ${completed_idx} ]]; then
         return 0  # Already completed
     fi
@@ -124,7 +133,7 @@ stage_completed() {
 # Show completed stages
 show_completed_stages() {
     local completed_idx=$(get_completed_stage_index)
-    
+
     if [[ ${completed_idx} -ge 0 ]]; then
         echo "=== Previously completed stages ==="
         for ((i = 0; i <= completed_idx && i < ${#STAGES[@]}; i++)); do
@@ -210,23 +219,23 @@ get_source() {
 
 check_prerequisites() {
     log "Checking prerequisites"
-    
+
     local missing=()
-    
-    for cmd in gcc g++ make bison flex makeinfo wget; do
+
+    for cmd in gcc g++ make bison flex makeinfo wget tar xz; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
     done
-    
+
     if [ ${#missing[@]} -ne 0 ]; then
         echo "ERROR: Missing required tools: ${missing[*]}"
         echo ""
         echo "Install with:"
-        echo "  pacman -S base-devel mingw-w64-ucrt-x86_64-toolchain texinfo bison flex wget"
+        echo "  pacman -S base-devel mingw-w64-ucrt-x86_64-toolchain texinfo bison flex wget tar xz"
         exit 1
     fi
-    
+
     # Check we're in UCRT64 environment
     if [[ ! "$MSYSTEM" == "UCRT64" ]]; then
         echo "WARNING: Not running in UCRT64 environment (MSYSTEM=$MSYSTEM)"
@@ -248,17 +257,17 @@ check_prerequisites() {
 
 build_gmp() {
     local stage="gmp"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building GMP ${GMP_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" "gmp"
 
-    # GMP - Skip reliability test (line ~7030)
+    # GMP - Skip reliability test
     if ! grep -q "# PATCHED: Skip reliability test" "${SCRIPT_DIR}/gmp/configure"; then
         echo "Patching GMP reliability test..."
         cd "${SCRIPT_DIR}/gmp"
@@ -276,95 +285,95 @@ build_gmp() {
 
     mkdir -p "${BUILDDIR}/gmp"
     cd "${BUILDDIR}/gmp"
-    
+
     "${SCRIPT_DIR}/gmp/configure" \
         --prefix="${STAGING}" \
         --disable-shared \
         --enable-static
-    
+
     make -j${JOBS}
     make install
-    
+
     mark_stage_complete "${stage}"
 }
 
 build_mpfr() {
     local stage="mpfr"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building MPFR ${MPFR_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VERSION}.tar.xz" "mpfr"
-    
+
     mkdir -p "${BUILDDIR}/mpfr"
     cd "${BUILDDIR}/mpfr"
-    
+
     "${SCRIPT_DIR}/mpfr/configure" \
         --prefix="${STAGING}" \
         --with-gmp="${STAGING}" \
         --disable-shared \
         --enable-static
-    
+
     make -j${JOBS}
     make install
-    
+
     mark_stage_complete "${stage}"
 }
 
 build_mpc() {
     local stage="mpc"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building MPC ${MPC_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.gz" "mpc"
-    
+
     mkdir -p "${BUILDDIR}/mpc"
     cd "${BUILDDIR}/mpc"
-    
+
     "${SCRIPT_DIR}/mpc/configure" \
         --prefix="${STAGING}" \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
         --disable-shared \
         --enable-static
-    
+
     make -j${JOBS}
     make install
-    
+
     mark_stage_complete "${stage}"
 }
 
 build_binutils() {
     local stage="binutils"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building Binutils ${BINUTILS_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
 
     mkdir -p "${BUILDDIR}/binutils"
     cd "${BUILDDIR}/binutils"
-    
+
     "${SCRIPT_DIR}/binutils/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
         --disable-nls \
         --disable-shared \
         --disable-werror
-    
+
     make -j${JOBS}
     make install
 
@@ -386,13 +395,11 @@ build_gcc_stage1() {
     # Patch Makefile.in to fix MSYS2 path conversion for gtyp-input.list
     # The gentype.exe program can't handle /c/<path> style paths, needs C:/<path>
     # IMPORTANT: Must use uppercase drive letter to avoid confusion with directory names
-    # e.g., /c/path/c/file.c -> C:/path/c/file.c (not c:/path/c/file.c)
     if ! grep -q "tmp-gi-win.list" "${SCRIPT_DIR}/gcc/gcc/Makefile.in"; then
         echo "Patching GCC Makefile.in for MSYS2 path conversion..."
         cd "${SCRIPT_DIR}/gcc/gcc"
 
         # Use awk for reliable uppercase conversion of drive letters
-        # This converts /c/path to C:/path, /d/path to D:/path, etc.
         sed -i '/move-if-change tmp-gi.list gtyp-input.list/{
 i\
 	awk '"'"'{if(match($$0,/^\\/([a-zA-Z])\\//)){print toupper(substr($$0,2,1))":/"substr($$0,4)}else{print}}'"'"' tmp-gi.list > tmp-gi-win.list
@@ -435,22 +442,22 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
 
 build_newlib() {
     local stage="newlib"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building Newlib ${NEWLIB_VERSION}"
 
     get_source "https://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz" "newlib"
 
     # Ensure the stage1 compiler is in PATH
     export PATH="${PREFIX}/bin:${PATH}"
-    
+
     mkdir -p "${BUILDDIR}/newlib"
     cd "${BUILDDIR}/newlib"
-    
+
     # Common newlib configuration
     local newlib_opts=(
         --prefix="${PREFIX}"
@@ -529,19 +536,19 @@ build_gcc_stage2() {
 
 build_gdb() {
     local stage="gdb"
-    
+
     if stage_completed "${stage}"; then
         echo "[OK] Stage: ${stage} (already completed)"
         return 0
     fi
-    
+
     log "Building GDB ${GDB_VERSION}"
 
     get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" "gdb"
 
     mkdir -p "${BUILDDIR}/gdb"
     cd "${BUILDDIR}/gdb"
-    
+
     local python_opt="--with-python=no"
     if [ "${GDB_PYTHON}" == "yes" ]; then
         python_opt="--with-python=$(which python3)"
@@ -549,7 +556,7 @@ build_gdb() {
     else
         echo "Building GDB without Python support (portable)"
     fi
-    
+
     "${SCRIPT_DIR}/gdb/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
@@ -558,10 +565,10 @@ build_gdb() {
         --disable-nls \
         --disable-werror \
         ${python_opt}
-    
+
     make -j${JOBS}
     make install
-    
+
     mark_stage_complete "${stage}"
 }
 
@@ -569,18 +576,18 @@ copy_runtime_dlls() {
     if [ "${PORTABLE}" != "yes" ]; then
         return 0
     fi
-    
+
     log "Copying runtime DLLs for portability"
-    
+
     local dlls=(
         "libgcc_s_seh-1.dll"
         "libstdc++-6.dll"
         "libwinpthread-1.dll"
     )
-    
+
     local dll_src="/ucrt64/bin"
     local dll_dst="${PREFIX}/bin"
-    
+
     for dll in "${dlls[@]}"; do
         if [ -f "${dll_src}/${dll}" ]; then
             echo "Copying ${dll}"
@@ -589,7 +596,7 @@ copy_runtime_dlls() {
             echo "WARNING: ${dll} not found in ${dll_src}"
         fi
     done
-    
+
     # If Python is enabled, we need more DLLs
     if [ "${GDB_PYTHON}" == "yes" ]; then
         echo ""
@@ -601,7 +608,7 @@ copy_runtime_dlls() {
 
 verify_build() {
     log "Verifying build"
-    
+
     local tools=(
         "mips-elf-gcc"
         "mips-elf-g++"
@@ -611,9 +618,9 @@ verify_build() {
         "mips-elf-objdump"
         "mips-elf-gdb"
     )
-    
+
     local all_ok=true
-    
+
     for tool in "${tools[@]}"; do
         local path="${PREFIX}/bin/${tool}.exe"
         if [ -f "$path" ]; then
@@ -627,7 +634,7 @@ verify_build() {
             all_ok=false
         fi
     done
-    
+
     # Check for newlib
     echo ""
     if [ -f "${PREFIX}/${TARGET}/lib/libc.a" ]; then
@@ -636,20 +643,20 @@ verify_build() {
         echo "[MISSING] newlib"
         all_ok=false
     fi
-    
+
     if [ -f "${PREFIX}/${TARGET}/lib/libm.a" ]; then
         echo "[OK] newlib math (libm.a)"
     fi
-    
+
     echo ""
-    
+
     if [ "$all_ok" = true ]; then
         echo "All tools built successfully!"
     else
         echo "Some tools are missing - check build log for errors"
         return 1
     fi
-    
+
     # Show DLL dependencies
     if command -v ntldd &> /dev/null; then
         echo ""
@@ -658,9 +665,93 @@ verify_build() {
     fi
 }
 
+create_release_archive() {
+    if [ "${MAKE_RELEASE}" != "yes" ]; then
+        echo "Skipping release archive (MAKE_RELEASE=no)"
+        return 0
+    fi
+
+    log "Creating release archive"
+
+    mkdir -p "${RELEASES_DIR}"
+
+    # Determine platform
+    local platform="win64"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        platform="linux-x64"
+    fi
+
+    # Archive filename
+    local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
+    local archive_path="${RELEASES_DIR}/${archive_name}.tar.xz"
+
+    # Get the base name of PREFIX (e.g., "pic32" from "/c/pic32")
+    local prefix_basename=$(basename "${PREFIX}")
+    local prefix_parent=$(dirname "${PREFIX}")
+
+    echo "Creating ${archive_name}.tar.xz ..."
+    echo "  Source: ${PREFIX}"
+    echo "  Output: ${archive_path}"
+
+    # Create the archive
+    # We cd to the parent directory and archive the basename to get clean paths
+    cd "${prefix_parent}"
+
+    # Use tar with xz compression
+    # The archive will contain "pic32/bin", "pic32/lib", etc.
+    tar -cJf "${archive_path}" "${prefix_basename}"
+
+    # Calculate size
+    local archive_size=$(du -h "${archive_path}" | cut -f1)
+
+    echo ""
+    echo "Release archive created:"
+    echo "  File: ${archive_path}"
+    echo "  Size: ${archive_size}"
+
+    # Create checksum
+    cd "${RELEASES_DIR}"
+    sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
+    echo "  SHA256: $(cat "${archive_name}.tar.xz.sha256")"
+    
+    # Create a version info file
+    cat > "${RELEASES_DIR}/${archive_name}.txt" << EOF
+PIC32 MIPS Toolchain ${TOOLCHAIN_VERSION}
+==========================================
+
+Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Platform: ${platform}
+
+Component Versions:
+  GCC:      ${GCC_VERSION}
+  Binutils: ${BINUTILS_VERSION}
+  Newlib:   ${NEWLIB_VERSION}
+  GDB:      ${GDB_VERSION}
+  GMP:      ${GMP_VERSION}
+  MPFR:     ${MPFR_VERSION}
+  MPC:      ${MPC_VERSION}
+
+Build Configuration:
+  Target:      ${TARGET}
+  Newlib-nano: ${NEWLIB_NANO}
+  GDB Python:  ${GDB_PYTHON}
+
+Installation:
+  1. Extract to C:\\pic32 (Windows) or /opt/pic32 (Linux)
+  2. Add <install-path>/bin to your PATH
+  3. Test with: mips-elf-gcc --version
+
+Built with: $(gcc --version | head -1)
+EOF
+
+    echo "  Info: ${RELEASES_DIR}/${archive_name}.txt"
+
+    cd "${SCRIPT_DIR}"
+}
+
 print_summary() {
     log "Build Complete"
-    
+
     echo "Toolchain installed to: ${PREFIX}"
     echo ""
     echo "Windows path: $(cygpath -w "${PREFIX}")"
@@ -676,6 +767,13 @@ print_summary() {
     echo "  ${PREFIX}/${TARGET}/lib/    - Runtime libraries (newlib)"
     echo "  ${PREFIX}/${TARGET}/include - C library headers"
     echo ""
+
+    if [ "${MAKE_RELEASE}" == "yes" ] && [ -d "${RELEASES_DIR}" ]; then
+        echo "Release archives:"
+        ls -lh "${RELEASES_DIR}"/*.tar.xz 2>/dev/null || echo "  (none)"
+        echo ""
+    fi
+
     echo "Next steps:"
     echo "  1. Add $(cygpath -w "${PREFIX}/bin") to your Windows PATH"
     echo "  2. Open a new Command Prompt and test:"
@@ -695,12 +793,13 @@ main() {
     echo "MIPS32 Cross-Compiler Toolchain Builder"
     echo ""
     echo "Configuration:"
-    echo "  TARGET:      ${TARGET}"
-    echo "  PREFIX:      ${PREFIX} ($(cygpath -w "${PREFIX}" 2>/dev/null || echo "N/A"))"
-    echo "  JOBS:        ${JOBS}"
-    echo "  GDB_PYTHON:  ${GDB_PYTHON}"
-    echo "  PORTABLE:    ${PORTABLE}"
-    echo "  NEWLIB_NANO: ${NEWLIB_NANO}"
+    echo "  TARGET:       ${TARGET}"
+    echo "  PREFIX:       ${PREFIX} ($(cygpath -w "${PREFIX}" 2>/dev/null || echo "N/A"))"
+    echo "  JOBS:         ${JOBS}"
+    echo "  GDB_PYTHON:   ${GDB_PYTHON}"
+    echo "  PORTABLE:     ${PORTABLE}"
+    echo "  NEWLIB_NANO:  ${NEWLIB_NANO}"
+    echo "  MAKE_RELEASE: ${MAKE_RELEASE}"
     echo ""
     echo "Source versions:"
     echo "  GMP:      ${GMP_VERSION}"
@@ -711,24 +810,24 @@ main() {
     echo "  Newlib:   ${NEWLIB_VERSION}"
     echo "  GDB:      ${GDB_VERSION}"
     echo ""
-    
+
     check_prerequisites
-    
+
     # Clean if requested
     if [ "${CLEAN}" == "yes" ]; then
         log "Cleaning build directory"
         rm -rf "${BUILDDIR}"
         rm -rf "${PREFIX}"
     fi
-    
+
     # Create directories
     mkdir -p "${BUILDDIR}"
     mkdir -p "${STAGING}"
     mkdir -p "${PREFIX}"
-    
+
     # Show what's already done
     show_completed_stages
-    
+
     # Handle SKIP_TO override (forces restart from a specific stage)
     if [ -n "${SKIP_TO}" ]; then
         local skip_idx=$(find_stage_index "${SKIP_TO}")
@@ -745,7 +844,7 @@ main() {
         fi
         echo ""
     fi
-    
+
     # Build stages (two-stage GCC build for newlib)
     build_gmp
     build_mpfr
@@ -755,10 +854,11 @@ main() {
     build_newlib        # Build newlib using stage1 compiler
     build_gcc_stage2    # Full compiler with newlib support
     build_gdb
-    
+
     # Post-build
     copy_runtime_dlls
     verify_build
+    create_release_archive
     print_summary
 }
 

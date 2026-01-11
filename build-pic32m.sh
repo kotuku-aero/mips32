@@ -579,30 +579,106 @@ copy_runtime_dlls() {
 
     log "Copying runtime DLLs for portability"
 
-    local dlls=(
-        "libgcc_s_seh-1.dll"
-        "libstdc++-6.dll"
-        "libwinpthread-1.dll"
-    )
-
-    local dll_src="/ucrt64/bin"
     local dll_dst="${PREFIX}/bin"
 
-    for dll in "${dlls[@]}"; do
-        if [ -f "${dll_src}/${dll}" ]; then
-            echo "Copying ${dll}"
-            cp "${dll_src}/${dll}" "${dll_dst}/"
-        else
-            echo "WARNING: ${dll} not found in ${dll_src}"
+    # Search paths for MSYS2 DLLs
+    local search_paths="/ucrt64/bin /mingw64/bin /usr/bin"
+
+    # Check for ntldd
+    if ! command -v ntldd &> /dev/null; then
+        echo "WARNING: ntldd not found, using fallback list"
+        echo "Install with: pacman -S mingw-w64-ucrt-x86_64-ntldd-git"
+        echo ""
+
+        # Fallback: just copy known runtime DLLs
+        for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+            if [ ! -f "${dll_dst}/${dll}" ] && [ -f "/ucrt64/bin/${dll}" ]; then
+                echo "  Copying ${dll}"
+                cp "/ucrt64/bin/${dll}" "${dll_dst}/"
+            fi
+        done
+        return 0
+    fi
+
+    echo "Using ntldd for dependency analysis"
+    echo ""
+
+    local pass=1
+    local total_copied=0
+    local max_passes=10
+
+    while [ $pass -le $max_passes ]; do
+        echo "Pass ${pass}: Scanning for dependencies..."
+
+        # Collect all DLLs needed in this pass
+        local dlls_needed=""
+
+        # Scan all .exe and .dll files in the destination
+        for file in "${dll_dst}"/*.exe "${dll_dst}"/*.dll; do
+            [ -f "$file" ] || continue
+
+            # Get ntldd output and extract DLL names that are in MSYS2 paths
+            # ntldd output format: "name.dll => C:\msys64\ucrt64\bin\name.dll (0x...)"
+            # Grep for "msys64" which identifies MSYS2 installation paths
+            local deps=$(ntldd "$file" 2>/dev/null | grep -i "msys64" | awk '{print $1}')
+
+            for dll in $deps; do
+                # Skip if already in destination
+                [ -f "${dll_dst}/${dll}" ] && continue
+
+                # Add to list if not already there
+                if [[ ! " ${dlls_needed} " =~ " ${dll} " ]]; then
+                    dlls_needed="${dlls_needed} ${dll}"
+                fi
+            done
+        done
+
+        # Remove leading space
+        dlls_needed="${dlls_needed# }"
+
+        # If no DLLs needed, we're done
+        if [ -z "$dlls_needed" ]; then
+            echo "  No new dependencies found"
+            break
         fi
+
+        # Copy the DLLs
+        echo "  Copying DLLs:${dlls_needed}"
+        for dll in $dlls_needed; do
+            for search_path in $search_paths; do
+                if [ -f "${search_path}/${dll}" ]; then
+                    echo "    [OK] ${dll}"
+                    cp "${search_path}/${dll}" "${dll_dst}/"
+                    ((total_copied++))
+                    break
+                fi
+            done
+        done
+
+        ((pass++))
     done
 
-    # If Python is enabled, we need more DLLs
+    echo ""
+    echo "DLL Summary:"
+    echo "  Total copied: ${total_copied}"
+    echo "  Scan passes:  $((pass - 1))"
+
+    # List all DLLs
+    echo ""
+    echo "DLLs in ${dll_dst}:"
+    ls -1 "${dll_dst}"/*.dll 2>/dev/null | while read -r f; do
+        echo "  $(basename "$f")"
+    done | head -20
+
+    local dll_count=$(ls -1 "${dll_dst}"/*.dll 2>/dev/null | wc -l)
+    echo ""
+    echo "Total: ${dll_count} DLLs"
+
+    # If Python is enabled, warn about additional DLLs
     if [ "${GDB_PYTHON}" == "yes" ]; then
         echo ""
         echo "NOTE: GDB was built with Python support."
         echo "      You may need to copy additional Python DLLs for portability."
-        echo "      Or set PYTHONHOME environment variable on target machines."
     fi
 }
 

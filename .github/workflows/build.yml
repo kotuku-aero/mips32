@@ -112,13 +112,13 @@ jobs:
             libmpc-dev \
       - name: Cache Source Archives
         uses: actions/cache@v4
+        with:
           restore-keys: |
             sources-
 
       - name: Build Toolchain
           chmod +x build-pic32m.sh
           ./build-pic32m.sh
-          echo "Build completed at: $(date)"
         env:
           PREFIX: ${{ github.workspace }}/pic32
           JOBS: 4
@@ -190,11 +190,11 @@ jobs:
             3. Test: `mips-elf-gcc --version`
             
             **Linux:**
-```bash
+            run in a bash shell
+            
             sudo tar -xJf pic32-toolchain-*-linux-x64.tar.xz -C /opt
             export PATH="/opt/pic32/bin:$PATH"
             mips-elf-gcc --version
-```
             
             ### What's Included
             - GCC cross-compiler targeting mips-elf

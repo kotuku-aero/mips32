@@ -1,0 +1,206 @@
+# .github/workflows/build.yml
+#
+# Build MIPS32 Cross-Compiler Toolchain for PIC32
+#
+# Triggers:
+#   - Push tags matching v* (e.g., v15.2.0)
+#   - Manual workflow dispatch
+#
+# Outputs:
+#   - Windows (UCRT64) toolchain archive
+#   - Linux x64 toolchain archive
+#   - GitHub Release with all artifacts (on tag push)
+#
+
+name: Build MIPS32 Toolchain
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: 'Version suffix for manual builds (e.g., -test1)'
+        required: false
+        default: '-dev'
+
+env:
+  GCC_VERSION: '15.2.0'
+
+jobs:
+  # ===========================================================================
+  # Windows Build (MSYS2 UCRT64)
+  # ===========================================================================
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-ntldd-git
+            texinfo
+            bison
+            flex
+            wget
+            tar
+            xz
+            zip
+
+      - name: Cache Source Archives
+        uses: actions/cache@v4
+        with:
+          path: sources/
+          key: sources-${{ hashFiles('build-pic32m.sh') }}
+          restore-keys: |
+            sources-
+
+      - name: Build Toolchain
+        run: |
+          echo "Starting Windows toolchain build..."
+          echo "Build started at: $(date)"
+          ./build-pic32m.sh
+          echo "Build completed at: $(date)"
+        env:
+          PREFIX: /c/pic32
+          JOBS: 4
+          MAKE_RELEASE: yes
+          PORTABLE: yes
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pic32-toolchain-win64
+          path: |
+            releases/*.zip
+            releases/*.zip.sha256
+            releases/*.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Linux Build
+  # ===========================================================================
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            texinfo \
+            bison \
+            flex \
+            libmpfr-dev \
+            libmpc-dev \
+      - name: Cache Source Archives
+        uses: actions/cache@v4
+          restore-keys: |
+            sources-
+
+      - name: Build Toolchain
+          chmod +x build-pic32m.sh
+          ./build-pic32m.sh
+          echo "Build completed at: $(date)"
+        env:
+          PREFIX: ${{ github.workspace }}/pic32
+          JOBS: 4
+          MAKE_RELEASE: yes
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pic32-toolchain-linux-x64
+          path: |
+            releases/*.tar.xz
+            releases/*.tar.xz.sha256
+            releases/*.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Create GitHub Release (only on tag push)
+  # ===========================================================================
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pic32-toolchain-win64
+          path: release-files/
+
+      - name: Download Linux Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pic32-toolchain-linux-x64
+          path: release-files/
+
+      - name: List Release Files
+        run: |
+          echo "Release files:"
+          ls -lah release-files/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PIC32 MIPS Toolchain ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
+          generate_release_notes: true
+          files: |
+            release-files/*
+          body: |
+            ## PIC32 MIPS32 Cross-Compiler Toolchain
+            
+            Based on GCC ${{ env.GCC_VERSION }} with newlib for bare-metal PIC32 development.
+            
+            ### Downloads
+            - **Windows**: `pic32-toolchain-*-win64.zip`
+            - **Linux**: `pic32-toolchain-*-linux-x64.tar.xz`
+            
+            ### Installation
+            
+            **Windows:**
+            1. Extract to `C:\pic32`
+            2. Add `C:\pic32\bin` to your PATH
+            3. Test: `mips-elf-gcc --version`
+            
+            **Linux:**
+```bash
+            sudo tar -xJf pic32-toolchain-*-linux-x64.tar.xz -C /opt
+            export PATH="/opt/pic32/bin:$PATH"
+            mips-elf-gcc --version
+```
+            
+            ### What's Included
+            - GCC cross-compiler targeting mips-elf
+            - Binutils (assembler, linker, objcopy, etc.)
+            - Newlib C library (standard and nano variants)
+            - GDB debugger
+            
+            See the included `.txt` file for full version details.        run: |
+

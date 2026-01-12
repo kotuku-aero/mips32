@@ -364,6 +364,15 @@ build_binutils() {
 
     get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
 
+    # Fix static_assert keyword clash in mips-formats.h (C11 reserved keyword)
+    # This affects both binutils and gdb builds
+    local mips_formats="${SCRIPT_DIR}/binutils/opcodes/mips-formats.h"
+    if [ -f "${mips_formats}" ]; then
+        echo "Patching mips-formats.h for C11 static_assert keyword clash..."
+        sed -i 's/static_assert\[/static_assert_check[/g' "${mips_formats}"
+        echo "  [OK] Renamed static_assert arrays to static_assert_check"
+    fi
+
     mkdir -p "${BUILDDIR}/binutils"
     cd "${BUILDDIR}/binutils"
 
@@ -544,10 +553,58 @@ build_gdb() {
 
     log "Building GDB ${GDB_VERSION}"
 
-    get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" "gdb"
+    get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" gdb
 
+    rm -rf "${BUILDDIR}/gdb"
     mkdir -p "${BUILDDIR}/gdb"
     cd "${BUILDDIR}/gdb"
+
+    # Fix readline signal handler type mismatch on MSYS2/Windows
+    # GDB 15.x readline has old-style K&R function pointer typedefs that
+    # don't match the modern signal() prototype: void (*)(int)
+    local signals_c="${SCRIPT_DIR}/gdb/readline/readline/signals.c"
+    if [ -f "${signals_c}" ]; then
+        echo "Patching readline/signals.c for MSYS2 compatibility..."
+
+        # Fix 1: Change SigHandler typedef from unspecified params to proper (int)
+        # Old: typedef RETSIGTYPE SigHandler ();
+        # New: typedef void SigHandler(int);
+        sed -i 's/typedef RETSIGTYPE SigHandler ();/typedef void SigHandler(int);/' "${signals_c}"
+
+        # Fix 2: Change SIGHANDLER_RETURN from "return (0)" to "return"
+        # Signal handlers return void on modern systems
+        sed -i 's/#  define SIGHANDLER_RETURN return (0)/#  define SIGHANDLER_RETURN return/' "${signals_c}"
+
+        echo "  [OK] Patched signal handler types"
+    else
+        echo "  [WARN] signals.c not found at expected path, skipping patch"
+    fi
+
+    # Fix static_assert keyword clash in mips-formats.h (C11 reserved keyword)
+    local mips_formats="${SCRIPT_DIR}/gdb/opcodes/mips-formats.h"
+    if [ -f "${mips_formats}" ]; then
+        echo "Patching mips-formats.h for C11 static_assert keyword clash..."
+        sed -i 's/static_assert\[/static_assert_check[/g' "${mips_formats}"
+        echo "  [OK] Renamed static_assert arrays to static_assert_check"
+    fi
+
+    # Fix signal handler type in sim/common/nrun.c for MSYS2/Windows
+    # The prev_sigint variable and cntrl_c handler use old-style void(void) signature
+    # but Windows signal() expects void(int)
+    local nrun_c="${SCRIPT_DIR}/gdb/sim/common/nrun.c"
+    if [ -f "${nrun_c}" ]; then
+        echo "Patching sim/common/nrun.c for MSYS2 signal handler compatibility..."
+
+
+        # Fix the typedef/declaration of prev_sigint from void(*)(void) to void(*)(int)
+        sed -i 's/(\*prev_sigint) ()/(*prev_sigint)(int)/' "${nrun_c}"
+
+        # Fix the cntrl_c handler signature if it's void cntrl_c(void)
+        sed -i 's/^static void cntrl_c ()/static void cntrl_c(int sig)/' "${nrun_c}"
+        sed -i 's/^cntrl_c (void)/cntrl_c(int sig)/' "${nrun_c}"
+
+        echo "  [OK] Patched signal handler types"
+    fi
 
     local python_opt="--with-python=no"
     if [ "${GDB_PYTHON}" == "yes" ]; then

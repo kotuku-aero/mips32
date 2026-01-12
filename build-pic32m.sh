@@ -789,13 +789,6 @@ verify_build() {
         echo "Some tools are missing - check build log for errors"
         return 1
     fi
-
-    # Show DLL dependencies
-    if command -v ntldd &> /dev/null; then
-        echo ""
-        echo "DLL dependencies for mips-elf-gcc:"
-        ntldd "${PREFIX}/bin/mips-elf-gcc.exe" 2>/dev/null | grep -v "Windows" | head -20
-    fi
 }
 
 create_release_archive() {

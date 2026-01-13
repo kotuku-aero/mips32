@@ -706,13 +706,13 @@ copy_runtime_dlls() {
                 if [ -f "${search_path}/${dll}" ]; then
                     echo "    [OK] ${dll}"
                     cp "${search_path}/${dll}" "${dll_dst}/"
-                    ((total_copied++))
+                    total_copied=$((total_copied + 1))
                     break
                 fi
             done
         done
 
-        ((pass++))
+        pass=$((pass + 1))
     done
 
     echo ""

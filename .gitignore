@@ -44,3 +44,5 @@ desktop.ini
 *.tgz
 *.zip
 
+/build.err
+/temp_staging

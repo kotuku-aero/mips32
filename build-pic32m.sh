@@ -3,8 +3,14 @@
 # build-pic32m.sh - Build MIPS32 cross-compiler toolchain for PIC32
 #
 # This script builds a complete cross-compiler toolchain targeting
-# mips-elf (PIC32) processors. It produces native Windows executables
-# when run under MSYS2 UCRT64.
+# mips-elf (PIC32) processors with MULTILIB support for hard-float FP64.
+# It produces native Windows executables when run under MSYS2 UCRT64.
+#
+# MULTILIB SUPPORT:
+#   This version builds multiple library variants:
+#   - soft-float/eb (big-endian soft-float) - default
+#   - soft-float/el (little-endian soft-float) - for PIC32MX/MK
+#   - hard-float/mfp64/el (little-endian hard-float FP64) - FOR PIC32MZ-EF
 #
 # The script automatically tracks completed stages and resumes from
 # the last successful stage on re-run.
@@ -30,19 +36,19 @@
 set -e  # Exit on error
 
 #-----------------------------------------------------------------------------
-# Source Versions - Update these when new versions are released
+# Source Versions - GCC 14.2.0 for better hard-float multilib support
 #-----------------------------------------------------------------------------
 
 GMP_VERSION="6.3.0"
-MPFR_VERSION="4.2.2"
+MPFR_VERSION="4.2.1"
 MPC_VERSION="1.3.1"
-BINUTILS_VERSION="2.44"
-GCC_VERSION="15.2.0"
-NEWLIB_VERSION="4.5.0.20241231"
-GDB_VERSION="15.2"
+BINUTILS_VERSION="2.43.1"
+GCC_VERSION="14.2.0"
+NEWLIB_VERSION="4.4.0.20231231"
+GDB_VERSION="15.1"
 
 # Release version string (used for archive naming)
-TOOLCHAIN_VERSION="${GCC_VERSION}"
+TOOLCHAIN_VERSION="${GCC_VERSION}-multilib"
 
 #-----------------------------------------------------------------------------
 # Configuration
@@ -208,8 +214,18 @@ get_source() {
     log "Found extracted directory: $(basename "$extracted_dir")"
 
     # Remove old target and move extracted source
+    # On MSYS2/Windows, directory moves can fail due to lingering handles
+    # Use retry logic with small delays
     rm -rf "$target_dir"
-    mv "$extracted_dir" "$target_dir"
+
+    mv "$extracted_dir" "$target_dir" 2>/dev/null;
+
+    if [ ! -d "$target_dir" ]; then
+        echo "Error: Failed to move $extracted_dir to $target_dir after $max_retries attempts"
+        echo "Try manually: mv $extracted_dir $target_dir"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
 
     # Clean up
     rm -rf "$temp_dir"
@@ -249,6 +265,190 @@ check_prerequisites() {
     fi
 
     echo "All prerequisites satisfied"
+}
+
+#-----------------------------------------------------------------------------
+# Multilib Configuration Function
+#-----------------------------------------------------------------------------
+
+patch_gcc_multilib() {
+    log "Patching GCC for PIC32 multilib support"
+
+    local config_gcc="${SCRIPT_DIR}/gcc/gcc/config.gcc"
+
+    # Verify config.gcc has the expected tmake_file for mips-*-elf*
+    # GCC 14.2 already has this at line ~2771-2773:
+    #   mips-*-elf* | mipsel-*-elf* | mipsr5900-*-elf* | mipsr5900el-*-elf*)
+    #       tm_file="elfos.h newlib-stdint.h ${tm_file} mips/elf.h"
+    #       tmake_file="mips/t-elf"
+    #       ;;
+    if [ -f "${config_gcc}" ]; then
+        # Check for the actual pattern (mips-*-elf*, not mips*-*-elf*)
+        if grep -q 'mips-\*-elf\*' "${config_gcc}"; then
+            # Verify tmake_file is set in that section
+            if grep -B1 -A3 'mips-\*-elf\*.*mipsel-\*-elf\*' "${config_gcc}" | grep -q 'tmake_file=.*mips/t-elf'; then
+                echo "  [OK] config.gcc: mips-*-elf* section has tmake_file=\"mips/t-elf\""
+            else
+                echo "  WARNING: mips-*-elf* section found but tmake_file not verified"
+                echo "  Checking if t-elf is referenced..."
+                if grep -A5 'mips-\*-elf\*' "${config_gcc}" | grep -q 't-elf'; then
+                    echo "  [OK] t-elf reference found"
+                else
+                    echo "  ERROR: t-elf not found in mips-*-elf* section!"
+                    echo "  Your GCC source may be non-standard. Please check:"
+                    echo "    ${config_gcc}"
+                    echo "  Look for 'mips-*-elf*' around line 2771"
+                    exit 1
+                fi
+            fi
+        else
+            echo "  ERROR: Could not find mips-*-elf* target in config.gcc!"
+            echo "  This is unexpected for GCC ${GCC_VERSION}"
+            exit 1
+        fi
+    else
+        echo "  ERROR: config.gcc not found at ${config_gcc}"
+        echo "  Make sure GCC source is extracted first"
+        exit 1
+    fi
+
+    # Now patch t-elf with our multilib configuration
+    local t_elf="${SCRIPT_DIR}/gcc/gcc/config/mips/t-elf"
+
+    if [ ! -f "${t_elf}" ]; then
+        echo "  ERROR: t-elf not found at ${t_elf}"
+        exit 1
+    fi
+
+    # Backup original if not already done
+    if [ ! -f "${t_elf}.original" ]; then
+        echo "Backing up original t-elf..."
+        cp "${t_elf}" "${t_elf}.original"
+    fi
+
+    # Check if already patched
+    if grep -q "PIC32 MULTILIB" "${t_elf}"; then
+        echo "  [OK] t-elf already patched for PIC32 multilib"
+        return 0
+    fi
+
+    echo "Patching t-elf with PIC32 multilib configuration..."
+
+    # Replace the entire file with our multilib configuration
+    cat > "${t_elf}" << 'EOF'
+# Copyright (C) 1999-2024 Free Software Foundation, Inc.
+#
+# This file is part of GCC.
+#
+# GCC is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3, or (at your option)
+# any later version.
+#
+# GCC is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with GCC; see the file COPYING3.  If not see
+# <http://www.gnu.org/licenses/>.
+
+# PIC32 MULTILIB CONFIGURATION for GCC 14
+# Build libraries for soft-float AND hard-float with FP64 (PIC32MZ-EF)
+#
+# The key insight for GCC 14: keep the multilib options simple and
+# ensure the directory names match what libgcc expects.
+
+# Options: endianness, float mode, fp register width
+MULTILIB_OPTIONS = EL/EB msoft-float/mhard-float mfp64
+
+# Directory names corresponding to the options
+MULTILIB_DIRNAMES = el eb soft-float hard-float mfp64
+
+# Command-line option aliases
+MULTILIB_MATCHES = EL=mel EB=meb
+
+# Specify exactly which combinations to build
+# GCC 14 prefers MULTILIB_REQUIRED over complex MULTILIB_EXCEPTIONS
+MULTILIB_REQUIRED = msoft-float/EB
+MULTILIB_REQUIRED += msoft-float/EL
+MULTILIB_REQUIRED += mhard-float/mfp64/EL
+
+# Exclude all other combinations explicitly
+# soft-float with mfp64 makes no sense
+MULTILIB_EXCEPTIONS = msoft-float/mfp64*
+# hard-float big-endian not needed for PIC32
+MULTILIB_EXCEPTIONS += mhard-float/EB
+MULTILIB_EXCEPTIONS += mhard-float/mfp64/EB
+# hard-float without mfp64 not needed (PIC32MZ-EF requires FP64)
+MULTILIB_EXCEPTIONS += mhard-float/EL
+EOF
+
+    echo "  [OK] Patched t-elf with PIC32 multilib configuration"
+    echo ""
+    echo "Multilib variants that will be built:"
+    echo "  1. soft-float/eb       - Default (big-endian soft-float)"
+    echo "  2. soft-float/el       - Little-endian soft-float (PIC32MX/MK)"
+    echo "  3. hard-float/mfp64/el - Hard-float FP64 (PIC32MZ-EF) ✓"
+    echo ""
+}
+#-----------------------------------------------------------------------------
+# GDB Patches for MSYS2/Windows compatibility
+#-----------------------------------------------------------------------------
+
+patch_gdb() {
+    log "Patching GDB for MSYS2/Windows compatibility"
+
+    # Patch 1: Fix static_assert C11 keyword clash in mips-formats.h
+    local mips_formats="${SCRIPT_DIR}/gdb/opcodes/mips-formats.h"
+    if [ -f "${mips_formats}" ]; then
+        if grep -q 'static_assert\[' "${mips_formats}"; then
+            echo "Patching mips-formats.h for C11 static_assert keyword clash..."
+            sed -i 's/static_assert\[/_static_assert[/g' "${mips_formats}"
+            echo "  [OK] Renamed static_assert arrays to _static_assert"
+        else
+            echo "  [OK] mips-formats.h: Already patched or not needed"
+        fi
+    fi
+
+    # Patch 2: Fix signal handler calling convention in readline/signals.c
+    local signals_c="${SCRIPT_DIR}/gdb/readline/readline/signals.c"
+    if [ -f "${signals_c}" ]; then
+        if ! grep -q "define VOID_SIGHANDLER" "${signals_c}"; then
+            echo "Patching readline/signals.c for signal handler convention..."
+            # Add VOID_SIGHANDLER define after #if defined (HANDLE_SIGNALS)
+            sed -i '/#if defined (HANDLE_SIGNALS)/a\
+\
+#define VOID_SIGHANDLER' "${signals_c}"
+            echo "  [OK] Added VOID_SIGHANDLER define"
+        else
+            echo "  [OK] readline/signals.c: VOID_SIGHANDLER already defined"
+        fi
+
+        # Fix SigHandler typedef
+        if grep -q 'typedef RETSIGTYPE SigHandler ();' "${signals_c}"; then
+            echo "Patching SigHandler typedef..."
+            sed -i 's/typedef RETSIGTYPE SigHandler ();/typedef RETSIGTYPE SigHandler (int);/' "${signals_c}"
+            echo "  [OK] Fixed SigHandler typedef"
+        else
+            echo "  [OK] readline/signals.c: SigHandler typedef already patched"
+        fi
+    fi
+
+    # Patch 3: Fix signal handler in sim/common/nrun.c
+    local nrun_c="${SCRIPT_DIR}/gdb/sim/common/nrun.c"
+    if [ -f "${nrun_c}" ]; then
+        if grep -q 'RETSIGTYPE (\*prev_sigint) ();' "${nrun_c}"; then
+            echo "Patching sim/common/nrun.c for signal handler..."
+            sed -i 's/RETSIGTYPE (\*prev_sigint) ();/RETSIGTYPE (*prev_sigint) (int);/' "${nrun_c}"
+            echo "  [OK] Fixed prev_sigint declaration"
+        else
+            echo "  [OK] sim/common/nrun.c: Already patched or not needed"
+        fi
+    fi
+
+    echo ""
 }
 
 #-----------------------------------------------------------------------------
@@ -365,9 +565,9 @@ build_binutils() {
     get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
 
     # Fix static_assert keyword clash in mips-formats.h (C11 reserved keyword)
-    # This affects both binutils and gdb builds
+    # This may or may not be needed in 2.43.1
     local mips_formats="${SCRIPT_DIR}/binutils/opcodes/mips-formats.h"
-    if [ -f "${mips_formats}" ]; then
+    if [ -f "${mips_formats}" ] && grep -q 'static_assert\[' "${mips_formats}"; then
         echo "Patching mips-formats.h for C11 static_assert keyword clash..."
         sed -i 's/static_assert\[/static_assert_check[/g' "${mips_formats}"
         echo "  [OK] Renamed static_assert arrays to static_assert_check"
@@ -397,25 +597,26 @@ build_gcc_stage1() {
         return 0
     fi
 
-    log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler)"
+    log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler with multilib)"
 
     get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
 
+    # CRITICAL: Patch GCC multilib configuration BEFORE configure runs!
+    # The multilib options are read during configure, not during make.
+    patch_gcc_multilib
+
     # Patch Makefile.in to fix MSYS2 path conversion for gtyp-input.list
-    # The gentype.exe program can't handle /c/<path> style paths, needs C:/<path>
-    # IMPORTANT: Must use uppercase drive letter to avoid confusion with directory names
     if ! grep -q "tmp-gi-win.list" "${SCRIPT_DIR}/gcc/gcc/Makefile.in"; then
         echo "Patching GCC Makefile.in for MSYS2 path conversion..."
         cd "${SCRIPT_DIR}/gcc/gcc"
 
-        # Use awk for reliable uppercase conversion of drive letters
         sed -i '/move-if-change tmp-gi.list gtyp-input.list/{
 i\
 	awk '"'"'{if(match($$0,/^\\/([a-zA-Z])\\//)){print toupper(substr($$0,2,1))":/"substr($$0,4)}else{print}}'"'"' tmp-gi.list > tmp-gi-win.list
 s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
 }' Makefile.in
 
-        echo "  [OK] GCC: Patched Makefile.in for Windows paths (uppercase drive letters)"
+        echo "  [OK] GCC: Patched Makefile.in for Windows paths"
     else
         echo "  [OK] GCC Makefile.in: Already patched"
     fi
@@ -423,9 +624,19 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
     # GCC needs to find the newly built binutils
     export PATH="${PREFIX}/bin:${PATH}"
 
+    # CRITICAL: Clean any previous build directory to ensure fresh configure
+    # This is necessary because multilib configuration is cached during configure
+    if [ -d "${BUILDDIR}/gcc-stage1" ]; then
+        echo "Removing previous gcc-stage1 build directory to ensure fresh configure..."
+        rm -rf "${BUILDDIR}/gcc-stage1"
+    fi
+
     mkdir -p "${BUILDDIR}/gcc-stage1"
     cd "${BUILDDIR}/gcc-stage1"
 
+    # GCC 14 configuration for hard-float multilib
+    # For MIPS, FP64 is controlled via multilib flags (-mfp64) in t-elf,
+    # not via configure options. --with-float=hard sets the default.
     "${SCRIPT_DIR}/gcc/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
@@ -441,10 +652,22 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --without-headers \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
-        --with-mpc="${STAGING}"
+        --with-mpc="${STAGING}" \
+        --with-float=hard \
+        --enable-multilib
 
     make -j${JOBS} all-gcc
     make install-gcc
+
+    # Verify multilib configuration
+    echo ""
+    echo "========================================="
+    echo "Verifying Stage 1 GCC multilib configuration..."
+    echo "========================================="
+    if command -v "${PREFIX}/bin/mips-elf-gcc" &> /dev/null; then
+        "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
+    fi
+    echo ""
 
     mark_stage_complete "${stage}"
 }
@@ -457,12 +680,32 @@ build_newlib() {
         return 0
     fi
 
-    log "Building Newlib ${NEWLIB_VERSION}"
+    log "Building Newlib ${NEWLIB_VERSION} with multilib support"
 
     get_source "https://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz" "newlib"
 
     # Ensure the stage1 compiler is in PATH
     export PATH="${PREFIX}/bin:${PATH}"
+
+    # Verify that GCC stage1 has multilib support before proceeding
+    echo "Checking GCC multilib configuration..."
+    local multilib_output=$("${PREFIX}/bin/mips-elf-gcc" -print-multi-lib 2>/dev/null)
+    echo "GCC reports multilib: ${multilib_output}"
+    
+    if [ "${multilib_output}" = ".;" ]; then
+        echo ""
+        echo "ERROR: GCC stage1 does not have multilib support!"
+        echo "This usually means the t-elf patch was not applied before GCC configure."
+        echo "Please run: CLEAN=yes ./build-pic32m.sh to start fresh."
+        echo ""
+        exit 1
+    fi
+
+    # CRITICAL: Clean any previous build directory to ensure fresh configure
+    if [ -d "${BUILDDIR}/newlib" ]; then
+        echo "Removing previous newlib build directory to ensure fresh configure..."
+        rm -rf "${BUILDDIR}/newlib"
+    fi
 
     mkdir -p "${BUILDDIR}/newlib"
     cd "${BUILDDIR}/newlib"
@@ -482,20 +725,38 @@ build_newlib() {
         --enable-newlib-global-atexit
         --disable-nls
         --disable-libgloss
+        --enable-multilib
     )
 
     if [ "${NEWLIB_NANO}" == "yes" ]; then
-        log "Building Newlib-nano variant"
+        log "Building Newlib-nano variant with multilib"
         newlib_opts+=(
             --enable-newlib-nano-formatted-io
             --disable-newlib-io-float
         )
     fi
 
+    # Configure for multilib build
     "${SCRIPT_DIR}/newlib/configure" "${newlib_opts[@]}"
 
-    make -j${JOBS}
+    # Build with reduced parallelism to avoid issues
+    make -j2
     make install
+
+    # Verify multilib libraries were installed
+    echo ""
+    echo "========================================="
+    echo "Verifying installed multilib libraries..."
+    echo "========================================="
+    for dir in "${PREFIX}/${TARGET}/lib/soft-float/eb" "${PREFIX}/${TARGET}/lib/soft-float/el" "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el"; do
+        if [ -d "$dir" ]; then
+            echo "  [OK] ${dir}"
+            ls -la "$dir"/*.a 2>/dev/null | head -3
+        else
+            echo "  [MISSING] ${dir}"
+        fi
+    done
+    echo ""
 
     mark_stage_complete "${stage}"
 }
@@ -508,10 +769,17 @@ build_gcc_stage2() {
         return 0
     fi
 
-    log "Building GCC ${GCC_VERSION} Stage 2 (with newlib support)"
+    log "Building GCC ${GCC_VERSION} Stage 2 (with newlib and multilib support)"
 
     # GCC needs to find binutils and stage1 compiler
     export PATH="${PREFIX}/bin:${PATH}"
+
+    # CRITICAL: Clean any previous build directory to ensure fresh configure
+    # Stage2 must also pick up the multilib configuration
+    if [ -d "${BUILDDIR}/gcc-stage2" ]; then
+        echo "Removing previous gcc-stage2 build directory to ensure fresh configure..."
+        rm -rf "${BUILDDIR}/gcc-stage2"
+    fi
 
     mkdir -p "${BUILDDIR}/gcc-stage2"
     cd "${BUILDDIR}/gcc-stage2"
@@ -530,7 +798,9 @@ build_gcc_stage2() {
         --with-newlib \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
-        --with-mpc="${STAGING}"
+        --with-mpc="${STAGING}" \
+        --with-float=hard \
+        --enable-multilib
 
     # Build gcc with full parallelism
     make -j${JOBS} all-gcc
@@ -539,6 +809,23 @@ build_gcc_stage2() {
     # Build libgcc with reduced parallelism to avoid MSYS2 process issues
     make -j2 all-target-libgcc
     make install-target-libgcc
+
+    # Verify libgcc multilib
+    echo ""
+    echo "========================================="
+    echo "Verifying libgcc multilib installation..."
+    echo "========================================="
+    for dir in "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/soft-float/eb" \
+               "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/soft-float/el" \
+               "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/hard-float/mfp64/el"; do
+        if [ -d "$dir" ]; then
+            echo "  [OK] ${dir}"
+            ls -la "$dir"/libgcc.a 2>/dev/null || echo "       (no libgcc.a)"
+        else
+            echo "  [MISSING] ${dir}"
+        fi
+    done
+    echo ""
 
     mark_stage_complete "${stage}"
 }
@@ -553,75 +840,30 @@ build_gdb() {
 
     log "Building GDB ${GDB_VERSION}"
 
-    get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" gdb
+    get_source "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz" "gdb"
 
-    rm -rf "${BUILDDIR}/gdb"
+    # Apply GDB patches for MSYS2/Windows compatibility
+    patch_gdb
+
     mkdir -p "${BUILDDIR}/gdb"
     cd "${BUILDDIR}/gdb"
 
-    # Fix readline signal handler type mismatch on MSYS2/Windows
-    # GDB 15.x readline has old-style K&R function pointer typedefs that
-    # don't match the modern signal() prototype: void (*)(int)
-    local signals_c="${SCRIPT_DIR}/gdb/readline/readline/signals.c"
-    if [ -f "${signals_c}" ]; then
-        echo "Patching readline/signals.c for MSYS2 compatibility..."
+    local gdb_opts=(
+        --prefix="${PREFIX}"
+        --target="${TARGET}"
+        --disable-nls
+        --disable-shared
+        --disable-werror
+    )
 
-        # Fix 1: Change SigHandler typedef from unspecified params to proper (int)
-        # Old: typedef RETSIGTYPE SigHandler ();
-        # New: typedef void SigHandler(int);
-        sed -i 's/typedef RETSIGTYPE SigHandler ();/typedef void SigHandler(int);/' "${signals_c}"
-
-        # Fix 2: Change SIGHANDLER_RETURN from "return (0)" to "return"
-        # Signal handlers return void on modern systems
-        sed -i 's/#  define SIGHANDLER_RETURN return (0)/#  define SIGHANDLER_RETURN return/' "${signals_c}"
-
-        echo "  [OK] Patched signal handler types"
-    else
-        echo "  [WARN] signals.c not found at expected path, skipping patch"
-    fi
-
-    # Fix static_assert keyword clash in mips-formats.h (C11 reserved keyword)
-    local mips_formats="${SCRIPT_DIR}/gdb/opcodes/mips-formats.h"
-    if [ -f "${mips_formats}" ]; then
-        echo "Patching mips-formats.h for C11 static_assert keyword clash..."
-        sed -i 's/static_assert\[/static_assert_check[/g' "${mips_formats}"
-        echo "  [OK] Renamed static_assert arrays to static_assert_check"
-    fi
-
-    # Fix signal handler type in sim/common/nrun.c for MSYS2/Windows
-    # The prev_sigint variable and cntrl_c handler use old-style void(void) signature
-    # but Windows signal() expects void(int)
-    local nrun_c="${SCRIPT_DIR}/gdb/sim/common/nrun.c"
-    if [ -f "${nrun_c}" ]; then
-        echo "Patching sim/common/nrun.c for MSYS2 signal handler compatibility..."
-
-
-        # Fix the typedef/declaration of prev_sigint from void(*)(void) to void(*)(int)
-        sed -i 's/(\*prev_sigint) ()/(*prev_sigint)(int)/' "${nrun_c}"
-
-        # Fix the cntrl_c handler signature if it's void cntrl_c(void)
-        sed -i 's/^static void cntrl_c ()/static void cntrl_c(int sig)/' "${nrun_c}"
-        sed -i 's/^cntrl_c (void)/cntrl_c(int sig)/' "${nrun_c}"
-
-        echo "  [OK] Patched signal handler types"
-    fi
-
-    local python_opt="--with-python=no"
     if [ "${GDB_PYTHON}" == "yes" ]; then
-        python_opt="--with-python=$(which python3)"
         echo "Building GDB with Python support"
+        gdb_opts+=(--with-python)
     else
-        echo "Building GDB without Python support (portable)"
+        gdb_opts+=(--without-python)
     fi
 
-    "${SCRIPT_DIR}/gdb/configure" \
-        --prefix="${PREFIX}" \
-        --target="${TARGET}" \
-        --with-gmp="${STAGING}" \
-        --with-mpfr="${STAGING}" \
-        --disable-nls \
-        --disable-werror \
-        ${python_opt}
+    "${SCRIPT_DIR}/gdb/configure" "${gdb_opts[@]}"
 
     make -j${JOBS}
     make install
@@ -631,6 +873,7 @@ build_gdb() {
 
 copy_runtime_dlls() {
     if [ "${PORTABLE}" != "yes" ]; then
+        echo "Skipping DLL copy (PORTABLE=no)"
         return 0
     fi
 
@@ -638,68 +881,48 @@ copy_runtime_dlls() {
 
     local dll_dst="${PREFIX}/bin"
 
-    # Search paths for MSYS2 DLLs
+    # Common search paths for MSYS2/UCRT64
     local search_paths="/ucrt64/bin /mingw64/bin /usr/bin"
 
-    # Check for ntldd
-    if ! command -v ntldd &> /dev/null; then
-        echo "WARNING: ntldd not found, using fallback list"
-        echo "Install with: pacman -S mingw-w64-ucrt-x86_64-ntldd-git"
-        echo ""
-
-        # Fallback: just copy known runtime DLLs
-        for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
-            if [ ! -f "${dll_dst}/${dll}" ] && [ -f "/ucrt64/bin/${dll}" ]; then
-                echo "  Copying ${dll}"
-                cp "/ucrt64/bin/${dll}" "${dll_dst}/"
-            fi
-        done
-        return 0
-    fi
-
-    echo "Using ntldd for dependency analysis"
-    echo ""
-
-    local pass=1
+    # Recursively find and copy DLL dependencies
+    local pass=0
+    local max_passes=5
     local total_copied=0
-    local max_passes=10
 
-    while [ $pass -le $max_passes ]; do
-        echo "Pass ${pass}: Scanning for dependencies..."
-
-        # Collect all DLLs needed in this pass
+    while [ $pass -lt $max_passes ]; do
         local dlls_needed=""
 
-        # Scan all .exe and .dll files in the destination
-        for file in "${dll_dst}"/*.exe "${dll_dst}"/*.dll; do
-            [ -f "$file" ] || continue
+        for exe in "${dll_dst}"/*.exe "${dll_dst}"/*.dll; do
+            [ -f "$exe" ] || continue
 
-            # Get ntldd output and extract DLL names that are in MSYS2 paths
-            # ntldd output format: "name.dll => C:\msys64\ucrt64\bin\name.dll (0x...)"
-            # Grep for "msys64" which identifies MSYS2 installation paths
-            local deps=$(ntldd "$file" 2>/dev/null | grep -i "msys64" | awk '{print $1}')
+            for dll in $(objdump -p "$exe" 2>/dev/null | grep "DLL Name:" | awk '{print $3}'); do
+                # Skip Windows system DLLs
+                case "$dll" in
+                    KERNEL32.dll|kernel32.dll|USER32.dll|user32.dll|GDI32.dll|gdi32.dll|\
+                    ADVAPI32.dll|advapi32.dll|SHELL32.dll|shell32.dll|ole32.dll|OLE32.dll|\
+                    OLEAUT32.dll|oleaut32.dll|MSVCRT.dll|msvcrt.dll|WS2_32.dll|ws2_32.dll|\
+                    CRYPT32.dll|crypt32.dll|SHLWAPI.dll|shlwapi.dll|COMDLG32.dll|comdlg32.dll|\
+                    ntdll.dll|NTDLL.dll|api-ms-*.dll|API-MS-*.dll|ext-ms-*.dll|EXT-MS-*.dll)
+                        continue
+                        ;;
+                esac
 
-            for dll in $deps; do
-                # Skip if already in destination
-                [ -f "${dll_dst}/${dll}" ] && continue
-
-                # Add to list if not already there
-                if [[ ! " ${dlls_needed} " =~ " ${dll} " ]]; then
-                    dlls_needed="${dlls_needed} ${dll}"
+                # Skip if already present
+                if [ -f "${dll_dst}/${dll}" ]; then
+                    continue
                 fi
+
+                dlls_needed="${dlls_needed} ${dll}"
             done
         done
 
-        # Remove leading space
         dlls_needed="${dlls_needed# }"
 
-        # If no DLLs needed, we're done
         if [ -z "$dlls_needed" ]; then
             echo "  No new dependencies found"
             break
         fi
 
-        # Copy the DLLs
         echo "  Copying DLLs:${dlls_needed}"
         for dll in $dlls_needed; do
             for search_path in $search_paths; do
@@ -716,27 +939,7 @@ copy_runtime_dlls() {
     done
 
     echo ""
-    echo "DLL Summary:"
-    echo "  Total copied: ${total_copied}"
-    echo "  Scan passes:  $((pass - 1))"
-
-    # List all DLLs
-    echo ""
-    echo "DLLs in ${dll_dst}:"
-    ls -1 "${dll_dst}"/*.dll 2>/dev/null | while read -r f; do
-        echo "  $(basename "$f")"
-    done | head -20
-
-    local dll_count=$(ls -1 "${dll_dst}"/*.dll 2>/dev/null | wc -l)
-    echo ""
-    echo "Total: ${dll_count} DLLs"
-
-    # If Python is enabled, warn about additional DLLs
-    if [ "${GDB_PYTHON}" == "yes" ]; then
-        echo ""
-        echo "NOTE: GDB was built with Python support."
-        echo "      You may need to copy additional Python DLLs for portability."
-    fi
+    echo "DLL Summary: Total copied: ${total_copied}"
 }
 
 verify_build() {
@@ -758,7 +961,6 @@ verify_build() {
         local path="${PREFIX}/bin/${tool}.exe"
         if [ -f "$path" ]; then
             echo "[OK] ${tool}"
-            # Try to run it
             if ! "${path}" --version > /dev/null 2>&1; then
                 echo "     WARNING: ${tool} exists but failed to run"
             fi
@@ -768,25 +970,59 @@ verify_build() {
         fi
     done
 
-    # Check for newlib
     echo ""
-    if [ -f "${PREFIX}/${TARGET}/lib/libc.a" ]; then
-        echo "[OK] newlib (libc.a)"
+    echo "Checking newlib libraries..."
+    
+    # Check soft-float variants
+    if [ -f "${PREFIX}/${TARGET}/lib/soft-float/eb/libc.a" ]; then
+        echo "[OK] newlib soft-float big-endian (soft-float/eb/libc.a)"
     else
-        echo "[MISSING] newlib"
+        echo "[MISSING] newlib soft-float big-endian"
         all_ok=false
     fi
 
-    if [ -f "${PREFIX}/${TARGET}/lib/libm.a" ]; then
-        echo "[OK] newlib math (libm.a)"
+    if [ -f "${PREFIX}/${TARGET}/lib/soft-float/el/libc.a" ]; then
+        echo "[OK] newlib soft-float little-endian (soft-float/el/libc.a)"
+    else
+        echo "[MISSING] newlib soft-float little-endian"
+        all_ok=false
+    fi
+
+    # Check hard-float FP64 variant (PIC32MZ-EF) - THE CRITICAL ONE
+    if [ -f "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" ]; then
+        echo "[OK] newlib hard-float FP64 (hard-float/mfp64/el/libc.a) - PIC32MZ-EF ✓✓✓"
+        
+        if command -v mips-elf-objdump &> /dev/null; then
+            local flags=$(mips-elf-objdump -p "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" 2>/dev/null | grep -i "flags" | head -1)
+            echo "     Library ABI: ${flags}"
+        fi
+    else
+        echo "[MISSING] newlib hard-float FP64 (hard-float/mfp64/el/libc.a) - REQUIRED FOR PIC32MZ-EF!"
+        all_ok=false
+    fi
+
+    echo ""
+    echo "Multilib configuration:"
+    if command -v "${PREFIX}/bin/mips-elf-gcc" &> /dev/null; then
+        "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
     fi
 
     echo ""
 
     if [ "$all_ok" = true ]; then
-        echo "All tools built successfully!"
+        echo "========================================="
+        echo "✓✓✓ SUCCESS! All tools and libraries built!"
+        echo "========================================="
+        echo ""
+        echo "To use with PIC32MZ-EF, compile with:"
+        echo "  mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ..."
+        echo ""
+        echo "Libraries will be automatically selected from:"
+        echo "  ${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/"
+        echo ""
+        echo "No more ABI mismatch warnings! 🎉"
     else
-        echo "Some tools are missing - check build log for errors"
+        echo "✗ Some tools or libraries are missing - check build log for errors"
         return 1
     fi
 }
@@ -801,73 +1037,36 @@ create_release_archive() {
 
     mkdir -p "${RELEASES_DIR}"
 
-    # Determine platform
     local platform="win64"
     if [[ "$(uname -s)" == "Linux" ]]; then
         platform="linux-x64"
     fi
 
-    # Archive filename (without extension)
     local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
-
-    # Get the base name of PREFIX (e.g., "pic32" from "/c/pic32")
     local prefix_basename=$(basename "${PREFIX}")
     local prefix_parent=$(dirname "${PREFIX}")
 
     echo "Creating release archives..."
-    echo "  Source: ${PREFIX}"
-    echo "  Output: ${RELEASES_DIR}/"
-    echo ""
-
-    # Change to parent directory for clean archive paths
     cd "${prefix_parent}"
 
-    # -------------------------------------------------------------------------
-    # Create .tar.xz archive (smaller, for Linux users and archival)
-    # -------------------------------------------------------------------------
     local tarxz_path="${RELEASES_DIR}/${archive_name}.tar.xz"
     echo "Creating ${archive_name}.tar.xz ..."
     tar -cJf "${tarxz_path}" "${prefix_basename}"
-    local tarxz_size=$(du -h "${tarxz_path}" | cut -f1)
-    echo "  [OK] ${tarxz_size}"
+    echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
 
-    # Create checksum for tar.xz
     cd "${RELEASES_DIR}"
     sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
 
-    # -------------------------------------------------------------------------
-    # Create .zip archive (easier to extract on Windows)
-    # -------------------------------------------------------------------------
     cd "${prefix_parent}"
     local zip_path="${RELEASES_DIR}/${archive_name}.zip"
-    echo "Creating ${archive_name}.zip ..."
-
-    # Use zip if available, otherwise fall back to 7z, otherwise skip
     if command -v zip &> /dev/null; then
+        echo "Creating ${archive_name}.zip ..."
         zip -rq "${zip_path}" "${prefix_basename}"
-        local zip_size=$(du -h "${zip_path}" | cut -f1)
-        echo "  [OK] ${zip_size}"
-
-        # Create checksum for zip
+        echo "  [OK] $(du -h "${zip_path}" | cut -f1)"
         cd "${RELEASES_DIR}"
         sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
-    elif command -v 7z &> /dev/null; then
-        7z a -tzip -mx=5 -bso0 -bsp0 "${zip_path}" "${prefix_basename}"
-        local zip_size=$(du -h "${zip_path}" | cut -f1)
-        echo "  [OK] ${zip_size}"
-
-        # Create checksum for zip
-        cd "${RELEASES_DIR}"
-        sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
-    else
-        echo "  [SKIP] Neither 'zip' nor '7z' found - install with:"
-        echo "         pacman -S zip"
-        echo "         or: pacman -S p7zip"
     fi
 
-    # -------------------------------------------------------------------------
-    # Create version info file
-    # -------------------------------------------------------------------------
     cat > "${RELEASES_DIR}/${archive_name}.txt" << EOF
 PIC32 MIPS Toolchain ${TOOLCHAIN_VERSION}
 ==========================================
@@ -880,40 +1079,19 @@ Component Versions:
   Binutils: ${BINUTILS_VERSION}
   Newlib:   ${NEWLIB_VERSION}
   GDB:      ${GDB_VERSION}
-  GMP:      ${GMP_VERSION}
-  MPFR:     ${MPFR_VERSION}
-  MPC:      ${MPC_VERSION}
 
-Build Configuration:
-  Target:      ${TARGET}
-  Newlib-nano: ${NEWLIB_NANO}
-  GDB Python:  ${GDB_PYTHON}
+Multilib Variants:
+  - soft-float/eb (default, big-endian)
+  - soft-float/el (little-endian) - for PIC32MX, PIC32MK
+  - hard-float/mfp64/el (hard-float FP64) - for PIC32MZ-EF
 
-Installation:
-  Windows:
-    1. Extract the .zip file to C:\\pic32
-    2. Add C:\\pic32\\bin to your system PATH
-    3. Open a new Command Prompt and test: mips-elf-gcc --version
-
-  MSYS2/Linux:
-    1. Extract: tar -xJf ${archive_name}.tar.xz -C /c  (or /opt)
-    2. Add to PATH: export PATH="/c/pic32/bin:\$PATH"
-    3. Test: mips-elf-gcc --version
+Usage for PIC32MZ-EF:
+  mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ...
+  
+  Libraries automatically selected from: lib/hard-float/mfp64/el/
 
 Built with: $(gcc --version | head -1)
-
-Checksums:
-  See ${archive_name}.tar.xz.sha256
-  See ${archive_name}.zip.sha256 (if available)
 EOF
-
-    # -------------------------------------------------------------------------
-    # Summary
-    # -------------------------------------------------------------------------
-    echo ""
-    echo "Release archives created in ${RELEASES_DIR}:"
-    ls -lh "${RELEASES_DIR}/${archive_name}"* 2>/dev/null
-    echo ""
 
     cd "${SCRIPT_DIR}"
 }
@@ -922,7 +1100,6 @@ print_summary() {
     log "Build Complete"
 
     echo "Toolchain installed to: ${PREFIX}"
-    echo ""
     echo "Windows path: $(cygpath -w "${PREFIX}")"
     echo ""
     echo "Component versions:"
@@ -931,27 +1108,19 @@ print_summary() {
     echo "  Newlib:   ${NEWLIB_VERSION}"
     echo "  GDB:      ${GDB_VERSION}"
     echo ""
-    echo "Contents:"
-    echo "  ${PREFIX}/bin/              - Cross-compiler tools"
-    echo "  ${PREFIX}/${TARGET}/lib/    - Runtime libraries (newlib)"
-    echo "  ${PREFIX}/${TARGET}/include - C library headers"
+    echo "Library directories:"
+    echo "  ${PREFIX}/${TARGET}/lib/soft-float/eb/         - Default (soft-float big-endian)"
+    echo "  ${PREFIX}/${TARGET}/lib/soft-float/el/         - Little-endian soft-float"
+    echo "  ${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/   - Hard-float FP64 (PIC32MZ-EF) ✓"
     echo ""
 
-    if [ "${MAKE_RELEASE}" == "yes" ] && [ -d "${RELEASES_DIR}" ]; then
-        echo "Release archives:"
-        ls -lh "${RELEASES_DIR}"/*.tar.xz 2>/dev/null || echo "  (none)"
-        echo ""
-    fi
+    echo "Multilib configuration:"
+    "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
+    echo ""
 
-    echo "Next steps:"
-    echo "  1. Add $(cygpath -w "${PREFIX}/bin") to your Windows PATH"
-    echo "  2. Open a new Command Prompt and test:"
-    echo "     mips-elf-gcc --version"
-    echo ""
-    echo "To use newlib in your projects:"
-    echo "  mips-elf-gcc -T linker.ld -nostartfiles startup.c main.c syscalls.c -o firmware.elf"
-    echo ""
-    echo "For CLion integration, see README.md"
+    echo "For PIC32MZ-EF projects:"
+    echo "  Compile: mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ..."
+    echo "  Result:  No more ABI mismatch warnings! 🎉"
 }
 
 #-----------------------------------------------------------------------------
@@ -959,72 +1128,58 @@ print_summary() {
 #-----------------------------------------------------------------------------
 
 main() {
-    echo "MIPS32 Cross-Compiler Toolchain Builder"
+    echo "========================================="
+    echo "MIPS32 Toolchain Builder - PIC32 MULTILIB"
+    echo "========================================="
+    echo ""
+    echo "This build includes hard-float FP64 support for PIC32MZ-EF"
     echo ""
     echo "Configuration:"
     echo "  TARGET:       ${TARGET}"
-    echo "  PREFIX:       ${PREFIX} ($(cygpath -w "${PREFIX}" 2>/dev/null || echo "N/A"))"
+    echo "  PREFIX:       ${PREFIX}"
     echo "  JOBS:         ${JOBS}"
-    echo "  GDB_PYTHON:   ${GDB_PYTHON}"
-    echo "  PORTABLE:     ${PORTABLE}"
-    echo "  NEWLIB_NANO:  ${NEWLIB_NANO}"
-    echo "  MAKE_RELEASE: ${MAKE_RELEASE}"
-    echo ""
-    echo "Source versions:"
-    echo "  GMP:      ${GMP_VERSION}"
-    echo "  MPFR:     ${MPFR_VERSION}"
-    echo "  MPC:      ${MPC_VERSION}"
-    echo "  Binutils: ${BINUTILS_VERSION}"
-    echo "  GCC:      ${GCC_VERSION}"
-    echo "  Newlib:   ${NEWLIB_VERSION}"
-    echo "  GDB:      ${GDB_VERSION}"
+    echo "  MULTILIB:     3 variants (soft-float/eb, soft-float/el, hard-float/mfp64/el)"
     echo ""
 
     check_prerequisites
 
-    # Clean if requested
     if [ "${CLEAN}" == "yes" ]; then
-        log "Cleaning build directory"
+        log "Cleaning build directory and source trees"
         rm -rf "${BUILDDIR}"
         rm -rf "${PREFIX}"
+        # Also remove GCC source directory to ensure fresh config.gcc patching
+        rm -rf "${SCRIPT_DIR}/gcc"
+        echo "Removed build directory, prefix, and gcc source directory"
     fi
 
-    # Create directories
     mkdir -p "${BUILDDIR}"
     mkdir -p "${STAGING}"
     mkdir -p "${PREFIX}"
 
-    # Show what's already done
     show_completed_stages
 
-    # Handle SKIP_TO override (forces restart from a specific stage)
     if [ -n "${SKIP_TO}" ]; then
         local skip_idx=$(find_stage_index "${SKIP_TO}")
         if [ ${skip_idx} -ge 0 ]; then
             echo "SKIP_TO=${SKIP_TO} specified, will resume from stage $((skip_idx + 1))"
-            # Set stage file to one before the requested stage
             if [ ${skip_idx} -eq 0 ]; then
                 rm -f "${STAGE_FILE}"
             else
                 echo "${STAGES[$((skip_idx - 1))]}" > "${STAGE_FILE}"
             fi
-        else
-            echo "WARNING: Unknown stage '${SKIP_TO}', ignoring SKIP_TO"
         fi
         echo ""
     fi
 
-    # Build stages (two-stage GCC build for newlib)
     build_gmp
     build_mpfr
     build_mpc
     build_binutils
-    build_gcc_stage1    # Bootstrap compiler without libc
-    build_newlib        # Build newlib using stage1 compiler
-    build_gcc_stage2    # Full compiler with newlib support
+    build_gcc_stage1
+    build_newlib
+    build_gcc_stage2
     build_gdb
 
-    # Post-build
     copy_runtime_dlls
     verify_build
     create_release_archive

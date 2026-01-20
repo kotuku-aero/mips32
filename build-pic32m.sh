@@ -54,7 +54,7 @@ TOOLCHAIN_VERSION="${GCC_VERSION}-multilib"
 # Configuration
 #-----------------------------------------------------------------------------
 
-export TARGET=mips32r2-elf
+export TARGET=mipsisa32r2-elf
 export PREFIX="${PREFIX:-/c/pic32}"
 export JOBS="${JOBS:-$(nproc)}"
 
@@ -216,11 +216,11 @@ get_source() {
     log "Found extracted directory: $(basename "$extracted_dir")"
 
     # Remove old target and move extracted source
-    # On MSYS2/Windows, directory moves can fail due to lingering handles
-    # Use retry logic with small delays
     rm -rf "$target_dir"
 
-    mv "$extracted_dir" "$target_dir" 2>/dev/null;
+    echo "moving from $extracted_dir to $target_dir"
+
+    mv "$extracted_dir" "$target_dir"
 
     if [ ! -d "$target_dir" ]; then
         echo "Error: Failed to move $extracted_dir to $target_dir after $max_retries attempts"
@@ -438,6 +438,10 @@ build_binutils() {
 
     log "Building Binutils ${BINUTILS_VERSION}"
 
+    # remove the output directory so that we have new tools
+    rm -rf "${PREFIX}"
+    mkdir "${PREFIX}"
+
     get_source "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" "binutils"
 
     # Fix static_assert keyword clash in mips-formats.h (C11 reserved keyword)
@@ -523,6 +527,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --disable-libgomp \
         --disable-libatomic \
         --with-newlib \
+        --with-arch=m14k \
         --without-headers \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
@@ -562,7 +567,7 @@ build_newlib() {
     echo "Checking GCC multilib configuration..."
     local multilib_output=$("${PREFIX}/bin/${TOOLCHAIN}-gcc" -print-multi-lib 2>/dev/null)
     echo "GCC reports multilib: ${multilib_output}"
-    
+
     if [ "${multilib_output}" = ".;" ]; then
         echo ""
         echo "ERROR: GCC stage1 does not have multilib support!"
@@ -667,6 +672,7 @@ build_gcc_stage2() {
         --disable-libquadmath \
         --disable-libgomp \
         --disable-libatomic \
+        --with-arch=m14k \
         --with-newlib \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
@@ -1019,7 +1025,6 @@ main() {
     if [ "${CLEAN}" == "yes" ]; then
         log "Cleaning build directory and source trees"
         rm -rf "${BUILDDIR}"
-        rm -rf "${PREFIX}"
         # Also remove GCC source directory to ensure fresh config.gcc patching
         rm -rf "${SCRIPT_DIR}/gcc"
         echo "Removed build directory, prefix, and gcc source directory"

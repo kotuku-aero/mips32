@@ -3,7 +3,7 @@
 # build-pic32m.sh - Build MIPS32 cross-compiler toolchain for PIC32
 #
 # This script builds a complete cross-compiler toolchain targeting
-# mips-elf (PIC32) processors with MULTILIB support for hard-float FP64.
+# ${TARGET} (PIC32) processors with MULTILIB support for hard-float FP64.
 # It produces native Windows executables when run under MSYS2 UCRT64.
 #
 # MULTILIB SUPPORT:
@@ -54,9 +54,11 @@ TOOLCHAIN_VERSION="${GCC_VERSION}-multilib"
 # Configuration
 #-----------------------------------------------------------------------------
 
-export TARGET=mips-elf
+export TARGET=mips32r2-elf
 export PREFIX="${PREFIX:-/c/pic32}"
 export JOBS="${JOBS:-$(nproc)}"
+
+export PATH=${PREFIX}:$PATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDDIR="${SCRIPT_DIR}/build"
@@ -268,132 +270,6 @@ check_prerequisites() {
 }
 
 #-----------------------------------------------------------------------------
-# Multilib Configuration Function
-#-----------------------------------------------------------------------------
-
-patch_gcc_multilib() {
-    log "Patching GCC for PIC32 multilib support"
-
-    local config_gcc="${SCRIPT_DIR}/gcc/gcc/config.gcc"
-
-    # Verify config.gcc has the expected tmake_file for mips-*-elf*
-    # GCC 14.2 already has this at line ~2771-2773:
-    #   mips-*-elf* | mipsel-*-elf* | mipsr5900-*-elf* | mipsr5900el-*-elf*)
-    #       tm_file="elfos.h newlib-stdint.h ${tm_file} mips/elf.h"
-    #       tmake_file="mips/t-elf"
-    #       ;;
-    if [ -f "${config_gcc}" ]; then
-        # Check for the actual pattern (mips-*-elf*, not mips*-*-elf*)
-        if grep -q 'mips-\*-elf\*' "${config_gcc}"; then
-            # Verify tmake_file is set in that section
-            if grep -B1 -A3 'mips-\*-elf\*.*mipsel-\*-elf\*' "${config_gcc}" | grep -q 'tmake_file=.*mips/t-elf'; then
-                echo "  [OK] config.gcc: mips-*-elf* section has tmake_file=\"mips/t-elf\""
-            else
-                echo "  WARNING: mips-*-elf* section found but tmake_file not verified"
-                echo "  Checking if t-elf is referenced..."
-                if grep -A5 'mips-\*-elf\*' "${config_gcc}" | grep -q 't-elf'; then
-                    echo "  [OK] t-elf reference found"
-                else
-                    echo "  ERROR: t-elf not found in mips-*-elf* section!"
-                    echo "  Your GCC source may be non-standard. Please check:"
-                    echo "    ${config_gcc}"
-                    echo "  Look for 'mips-*-elf*' around line 2771"
-                    exit 1
-                fi
-            fi
-        else
-            echo "  ERROR: Could not find mips-*-elf* target in config.gcc!"
-            echo "  This is unexpected for GCC ${GCC_VERSION}"
-            exit 1
-        fi
-    else
-        echo "  ERROR: config.gcc not found at ${config_gcc}"
-        echo "  Make sure GCC source is extracted first"
-        exit 1
-    fi
-
-    # Now patch t-elf with our multilib configuration
-    local t_elf="${SCRIPT_DIR}/gcc/gcc/config/mips/t-elf"
-
-    if [ ! -f "${t_elf}" ]; then
-        echo "  ERROR: t-elf not found at ${t_elf}"
-        exit 1
-    fi
-
-    # Backup original if not already done
-    if [ ! -f "${t_elf}.original" ]; then
-        echo "Backing up original t-elf..."
-        cp "${t_elf}" "${t_elf}.original"
-    fi
-
-    # Check if already patched
-    if grep -q "PIC32 MULTILIB" "${t_elf}"; then
-        echo "  [OK] t-elf already patched for PIC32 multilib"
-        return 0
-    fi
-
-    echo "Patching t-elf with PIC32 multilib configuration..."
-
-    # Replace the entire file with our multilib configuration
-    cat > "${t_elf}" << 'EOF'
-# Copyright (C) 1999-2024 Free Software Foundation, Inc.
-#
-# This file is part of GCC.
-#
-# GCC is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 3, or (at your option)
-# any later version.
-#
-# GCC is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with GCC; see the file COPYING3.  If not see
-# <http://www.gnu.org/licenses/>.
-
-# PIC32 MULTILIB CONFIGURATION for GCC 14
-# Build libraries for soft-float AND hard-float with FP64 (PIC32MZ-EF)
-#
-# The key insight for GCC 14: keep the multilib options simple and
-# ensure the directory names match what libgcc expects.
-
-# Options: endianness, float mode, fp register width
-MULTILIB_OPTIONS = EL/EB msoft-float/mhard-float mfp64
-
-# Directory names corresponding to the options
-MULTILIB_DIRNAMES = el eb soft-float hard-float mfp64
-
-# Command-line option aliases
-MULTILIB_MATCHES = EL=mel EB=meb
-
-# Specify exactly which combinations to build
-# GCC 14 prefers MULTILIB_REQUIRED over complex MULTILIB_EXCEPTIONS
-MULTILIB_REQUIRED = msoft-float/EB
-MULTILIB_REQUIRED += msoft-float/EL
-MULTILIB_REQUIRED += mhard-float/mfp64/EL
-
-# Exclude all other combinations explicitly
-# soft-float with mfp64 makes no sense
-MULTILIB_EXCEPTIONS = msoft-float/mfp64*
-# hard-float big-endian not needed for PIC32
-MULTILIB_EXCEPTIONS += mhard-float/EB
-MULTILIB_EXCEPTIONS += mhard-float/mfp64/EB
-# hard-float without mfp64 not needed (PIC32MZ-EF requires FP64)
-MULTILIB_EXCEPTIONS += mhard-float/EL
-EOF
-
-    echo "  [OK] Patched t-elf with PIC32 multilib configuration"
-    echo ""
-    echo "Multilib variants that will be built:"
-    echo "  1. soft-float/eb       - Default (big-endian soft-float)"
-    echo "  2. soft-float/el       - Little-endian soft-float (PIC32MX/MK)"
-    echo "  3. hard-float/mfp64/el - Hard-float FP64 (PIC32MZ-EF) ✓"
-    echo ""
-}
-#-----------------------------------------------------------------------------
 # GDB Patches for MSYS2/Windows compatibility
 #-----------------------------------------------------------------------------
 
@@ -579,6 +455,7 @@ build_binutils() {
     "${SCRIPT_DIR}/binutils/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
+        --program-prefix=${TOOLCHAIN} \
         --disable-nls \
         --disable-shared \
         --disable-werror
@@ -600,10 +477,6 @@ build_gcc_stage1() {
     log "Building GCC ${GCC_VERSION} Stage 1 (bootstrap compiler with multilib)"
 
     get_source "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" "gcc"
-
-    # CRITICAL: Patch GCC multilib configuration BEFORE configure runs!
-    # The multilib options are read during configure, not during make.
-    patch_gcc_multilib
 
     # Patch Makefile.in to fix MSYS2 path conversion for gtyp-input.list
     if ! grep -q "tmp-gi-win.list" "${SCRIPT_DIR}/gcc/gcc/Makefile.in"; then
@@ -641,6 +514,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
         --enable-languages=c \
+        --enable-fixed-point \
         --disable-threads \
         --disable-shared \
         --disable-nls \
@@ -664,8 +538,8 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
     echo "========================================="
     echo "Verifying Stage 1 GCC multilib configuration..."
     echo "========================================="
-    if command -v "${PREFIX}/bin/mips-elf-gcc" &> /dev/null; then
-        "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
+    if command -v "${PREFIX}/bin/${TARGET}-gcc" &> /dev/null; then
+        "${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib
     fi
     echo ""
 
@@ -684,12 +558,9 @@ build_newlib() {
 
     get_source "https://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz" "newlib"
 
-    # Ensure the stage1 compiler is in PATH
-    export PATH="${PREFIX}/bin:${PATH}"
-
     # Verify that GCC stage1 has multilib support before proceeding
     echo "Checking GCC multilib configuration..."
-    local multilib_output=$("${PREFIX}/bin/mips-elf-gcc" -print-multi-lib 2>/dev/null)
+    local multilib_output=$("${PREFIX}/bin/${TOOLCHAIN}-gcc" -print-multi-lib 2>/dev/null)
     echo "GCC reports multilib: ${multilib_output}"
     
     if [ "${multilib_output}" = ".;" ]; then
@@ -788,6 +659,7 @@ build_gcc_stage2() {
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
         --enable-languages=c,c++ \
+        --enable-fixed-point \
         --disable-threads \
         --disable-shared \
         --disable-nls \
@@ -851,6 +723,7 @@ build_gdb() {
     local gdb_opts=(
         --prefix="${PREFIX}"
         --target="${TARGET}"
+        --program-prefix=${TOOLCHAIN} \
         --disable-nls
         --disable-shared
         --disable-werror
@@ -946,13 +819,13 @@ verify_build() {
     log "Verifying build"
 
     local tools=(
-        "mips-elf-gcc"
-        "mips-elf-g++"
-        "mips-elf-as"
-        "mips-elf-ld"
-        "mips-elf-objcopy"
-        "mips-elf-objdump"
-        "mips-elf-gdb"
+        "${TARGET}-gcc"
+        "${TARGET}-g++"
+        "${TARGET}-as"
+        "${TARGET}-ld"
+        "${TARGET}-objcopy"
+        "${TARGET}-objdump"
+        "${TARGET}-gdb"
     )
 
     local all_ok=true
@@ -992,8 +865,8 @@ verify_build() {
     if [ -f "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" ]; then
         echo "[OK] newlib hard-float FP64 (hard-float/mfp64/el/libc.a) - PIC32MZ-EF ✓✓✓"
         
-        if command -v mips-elf-objdump &> /dev/null; then
-            local flags=$(mips-elf-objdump -p "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" 2>/dev/null | grep -i "flags" | head -1)
+        if command -v ${TARGET}-objdump &> /dev/null; then
+            local flags=$(${TARGET}-objdump -p "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" 2>/dev/null | grep -i "flags" | head -1)
             echo "     Library ABI: ${flags}"
         fi
     else
@@ -1003,8 +876,8 @@ verify_build() {
 
     echo ""
     echo "Multilib configuration:"
-    if command -v "${PREFIX}/bin/mips-elf-gcc" &> /dev/null; then
-        "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
+    if command -v "${PREFIX}/bin/${TARGET}-gcc" &> /dev/null; then
+        "${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib
     fi
 
     echo ""
@@ -1015,7 +888,7 @@ verify_build() {
         echo "========================================="
         echo ""
         echo "To use with PIC32MZ-EF, compile with:"
-        echo "  mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ..."
+        echo "  ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ..."
         echo ""
         echo "Libraries will be automatically selected from:"
         echo "  ${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/"
@@ -1086,7 +959,7 @@ Multilib Variants:
   - hard-float/mfp64/el (hard-float FP64) - for PIC32MZ-EF
 
 Usage for PIC32MZ-EF:
-  mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ...
+  ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ...
   
   Libraries automatically selected from: lib/hard-float/mfp64/el/
 
@@ -1115,11 +988,11 @@ print_summary() {
     echo ""
 
     echo "Multilib configuration:"
-    "${PREFIX}/bin/mips-elf-gcc" -print-multi-lib
+    "${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib
     echo ""
 
     echo "For PIC32MZ-EF projects:"
-    echo "  Compile: mips-elf-gcc -march=m14k -mhard-float -mfp64 -EL ..."
+    echo "  Compile: ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ..."
     echo "  Result:  No more ABI mismatch warnings! 🎉"
 }
 

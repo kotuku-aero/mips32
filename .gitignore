@@ -11,6 +11,7 @@
 /newlib/
 /sources/
 /releases/
+/temp_extract/
 
 # Build logs
 *.log

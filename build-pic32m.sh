@@ -500,9 +500,6 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         echo "  [OK] GCC Makefile.in: Already patched"
     fi
 
-    # GCC needs to find the newly built binutils
-    # export PATH="${PREFIX}/bin:${PATH}"
-
     # CRITICAL: Clean any previous build directory to ensure fresh configure
     # This is necessary because multilib configuration is cached during configure
     if [ -d "${BUILDDIR}/gcc-stage1" ]; then
@@ -898,42 +895,184 @@ create_release_archive() {
         return 0
     fi
 
-    log "Creating release archives"
+    log "Creating PIC32 release package"
 
     mkdir -p "${RELEASES_DIR}"
 
     local platform="win64"
+    local exe_suffix=".exe"
     if [[ "$(uname -s)" == "Linux" ]]; then
         platform="linux-x64"
+        exe_suffix=""
     fi
 
     local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
-    local prefix_basename=$(basename "${PREFIX}")
-    local prefix_parent=$(dirname "${PREFIX}")
+    local stage_dir="${BUILDDIR}/release-staging/pic32-toolchain"
 
-    echo "Creating release archives..."
-    cd "${prefix_parent}"
+    # Clean and create staging directory
+    rm -rf "${BUILDDIR}/release-staging"
+    mkdir -p "${stage_dir}/bin"
+    mkdir -p "${stage_dir}/pic32/lib"
+    mkdir -p "${stage_dir}/lib/gcc/pic32/${GCC_VERSION}"
 
-    local tarxz_path="${RELEASES_DIR}/${archive_name}.tar.xz"
-    echo "Creating ${archive_name}.tar.xz ..."
-    tar -cJf "${tarxz_path}" "${prefix_basename}"
-    echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
+    echo "Staging PIC32-specific release package..."
 
-    cd "${RELEASES_DIR}"
-    sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
+    # =========================================================================
+    # 1. Copy and rename executables from mipsisa32r2-elf-* to pic32-*
+    # =========================================================================
+    echo "Copying and renaming executables..."
+    
+    local tools=(
+        "gcc"
+        "g++"
+        "cpp"
+        "as"
+        "ld"
+        "ld.bfd"
+        "ar"
+        "nm"
+        "objcopy"
+        "objdump"
+        "ranlib"
+        "readelf"
+        "size"
+        "strings"
+        "strip"
+        "addr2line"
+        "c++filt"
+        "elfedit"
+        "gprof"
+        "gdb"
+        "run"
+    )
 
-    cd "${prefix_parent}"
-    local zip_path="${RELEASES_DIR}/${archive_name}.zip"
-    if command -v zip &> /dev/null; then
-        echo "Creating ${archive_name}.zip ..."
-        zip -rq "${zip_path}" "${prefix_basename}"
-        echo "  [OK] $(du -h "${zip_path}" | cut -f1)"
-        cd "${RELEASES_DIR}"
-        sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
+    for tool in "${tools[@]}"; do
+        local src="${PREFIX}/bin/${TARGET}-${tool}${exe_suffix}"
+        local dst="${stage_dir}/bin/pic32-${tool}${exe_suffix}"
+        if [ -f "$src" ]; then
+            cp "$src" "$dst"
+            echo "  [OK] pic32-${tool}"
+        fi
+    done
+
+    # Also copy gcc/g++ without prefix for convenience
+    if [ -f "${PREFIX}/bin/${TARGET}-gcc${exe_suffix}" ]; then
+        cp "${PREFIX}/bin/${TARGET}-gcc${exe_suffix}" "${stage_dir}/bin/pic32-gcc${exe_suffix}"
     fi
 
-    cat > "${RELEASES_DIR}/${archive_name}.txt" << EOF
-PIC32 MIPS Toolchain ${TOOLCHAIN_VERSION}
+    # Copy cc1, cc1plus, collect2, lto1, lto-wrapper from libexec
+    echo "Copying compiler support executables..."
+    local libexec_src="${PREFIX}/libexec/gcc/${TARGET}/${GCC_VERSION}"
+    local libexec_dst="${stage_dir}/libexec/gcc/pic32/${GCC_VERSION}"
+    if [ -d "$libexec_src" ]; then
+        mkdir -p "$libexec_dst"
+        for exe in cc1 cc1plus collect2 lto1 lto-wrapper liblto_plugin*; do
+            if [ -f "${libexec_src}/${exe}${exe_suffix}" ] || [ -f "${libexec_src}/${exe}" ]; then
+                cp "${libexec_src}/${exe}"* "$libexec_dst/" 2>/dev/null || true
+            fi
+        done
+        # Copy any .dll files in libexec
+        cp "${libexec_src}"/*.dll "$libexec_dst/" 2>/dev/null || true
+        echo "  [OK] libexec/gcc/pic32/${GCC_VERSION}/"
+    fi
+
+    # Copy runtime DLLs
+    echo "Copying runtime DLLs..."
+    cp "${PREFIX}/bin"/*.dll "${stage_dir}/bin/" 2>/dev/null || true
+
+    # =========================================================================
+    # 2. Copy only PIC32-relevant libraries (little-endian mips32r2)
+    # =========================================================================
+    echo "Copying PIC32-specific libraries..."
+
+    # Newlib libraries - only el/mips32r2 variants
+    local newlib_src="${PREFIX}/${TARGET}/lib"
+    local newlib_dst="${stage_dir}/pic32/lib"
+
+    # Hard-float little-endian mips32r2 (PIC32MZ EF) - this is the primary target
+    if [ -d "${newlib_src}/el/mips32r2" ]; then
+        mkdir -p "${newlib_dst}/el/mips32r2"
+        cp "${newlib_src}/el/mips32r2"/*.a "${newlib_dst}/el/mips32r2/"
+        echo "  [OK] pic32/lib/el/mips32r2/ (PIC32MZ EF - hard-float)"
+    fi
+
+    # Soft-float little-endian mips32r2 (PIC32MZ DA)
+    if [ -d "${newlib_src}/soft-float/el/mips32r2" ]; then
+        mkdir -p "${newlib_dst}/soft-float/el/mips32r2"
+        cp "${newlib_src}/soft-float/el/mips32r2"/*.a "${newlib_dst}/soft-float/el/mips32r2/"
+        echo "  [OK] pic32/lib/soft-float/el/mips32r2/ (PIC32MZ DA - soft-float)"
+    fi
+
+    # Copy include files
+    if [ -d "${PREFIX}/${TARGET}/include" ]; then
+        cp -r "${PREFIX}/${TARGET}/include" "${stage_dir}/pic32/"
+        echo "  [OK] pic32/include/"
+    fi
+
+    # =========================================================================
+    # 3. Copy GCC libraries (libgcc) - only el/mips32r2 variants
+    # =========================================================================
+    echo "Copying GCC support libraries..."
+
+    local gcc_lib_src="${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}"
+    local gcc_lib_dst="${stage_dir}/lib/gcc/pic32/${GCC_VERSION}"
+
+    # Hard-float little-endian mips32r2
+    if [ -d "${gcc_lib_src}/el/mips32r2" ]; then
+        mkdir -p "${gcc_lib_dst}/el/mips32r2"
+        cp "${gcc_lib_src}/el/mips32r2"/*.a "${gcc_lib_dst}/el/mips32r2/" 2>/dev/null || true
+        cp "${gcc_lib_src}/el/mips32r2"/*.o "${gcc_lib_dst}/el/mips32r2/" 2>/dev/null || true
+        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/el/mips32r2/"
+    fi
+
+    # Soft-float little-endian mips32r2
+    if [ -d "${gcc_lib_src}/soft-float/el/mips32r2" ]; then
+        mkdir -p "${gcc_lib_dst}/soft-float/el/mips32r2"
+        cp "${gcc_lib_src}/soft-float/el/mips32r2"/*.a "${gcc_lib_dst}/soft-float/el/mips32r2/" 2>/dev/null || true
+        cp "${gcc_lib_src}/soft-float/el/mips32r2"/*.o "${gcc_lib_dst}/soft-float/el/mips32r2/" 2>/dev/null || true
+        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/soft-float/el/mips32r2/"
+    fi
+
+    # Copy GCC include files and plugin headers
+    if [ -d "${gcc_lib_src}/include" ]; then
+        cp -r "${gcc_lib_src}/include" "${gcc_lib_dst}/"
+        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/include/"
+    fi
+    if [ -d "${gcc_lib_src}/include-fixed" ]; then
+        cp -r "${gcc_lib_src}/include-fixed" "${gcc_lib_dst}/"
+        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/include-fixed/"
+    fi
+    if [ -d "${gcc_lib_src}/install-tools" ]; then
+        cp -r "${gcc_lib_src}/install-tools" "${gcc_lib_dst}/"
+    fi
+
+    # =========================================================================
+    # 4. Copy linker scripts
+    # =========================================================================
+    if [ -d "${PREFIX}/${TARGET}/lib/ldscripts" ]; then
+        cp -r "${PREFIX}/${TARGET}/lib/ldscripts" "${newlib_dst}/"
+        echo "  [OK] pic32/lib/ldscripts/"
+    fi
+
+    # =========================================================================
+    # 5. Create GCC spec file to use pic32 paths
+    # =========================================================================
+    echo "Creating GCC specs for pic32 paths..."
+    cat > "${gcc_lib_dst}/specs" << 'SPECS'
+*cross_compile:
+1
+
+*multilib_defaults:
+EL mips32r2
+
+SPECS
+    echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/specs"
+
+    # =========================================================================
+    # 6. Create README
+    # =========================================================================
+    cat > "${stage_dir}/README.txt" << EOF
+PIC32 Toolchain ${TOOLCHAIN_VERSION}
 ==========================================
 
 Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -945,24 +1084,72 @@ Component Versions:
   Newlib:   ${NEWLIB_VERSION}
   GDB:      ${GDB_VERSION}
 
-Multilib Support:
-  Built with --with-float=hard, hard-float is the default.
-  Use: ${TARGET}-gcc -print-multi-lib to see all variants.
+This is a streamlined release containing only the libraries needed for
+PIC32MZ processors. Tools have been renamed from mipsisa32r2-elf-* to pic32-*.
 
-  Key variants for PIC32:
+Included Library Variants:
   - el/mips32r2           : PIC32MZ EF (hard-float, little-endian)
   - soft-float/el/mips32r2: PIC32MZ DA (soft-float, little-endian)
 
 Usage Examples:
 
   PIC32MZ EF (has hardware FPU):
-    ${TARGET}-gcc -march=mips32r2 -EL -c main.c
+    pic32-gcc -march=mips32r2 -EL -c main.c
 
   PIC32MZ DA (no hardware FPU):
-    ${TARGET}-gcc -march=mips32r2 -msoft-float -EL -c main.c
+    pic32-gcc -march=mips32r2 -msoft-float -EL -c main.c
+
+Tools Included:
+  pic32-gcc, pic32-g++, pic32-as, pic32-ld, pic32-objcopy,
+  pic32-objdump, pic32-gdb, pic32-ar, pic32-nm, pic32-strip, etc.
+
+Source: https://github.com/user/pic32-toolchain (update with actual URL)
+License: GPL v3 (GCC, Binutils, GDB), BSD/MIT (Newlib)
 
 Built with: $(gcc --version | head -1)
 EOF
+
+    # =========================================================================
+    # 7. Create archives
+    # =========================================================================
+    echo ""
+    echo "Creating release archives..."
+    cd "${BUILDDIR}/release-staging"
+
+    local tarxz_path="${RELEASES_DIR}/${archive_name}.tar.xz"
+    echo "Creating ${archive_name}.tar.xz ..."
+    tar -cJf "${tarxz_path}" "pic32-toolchain"
+    echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
+
+    cd "${RELEASES_DIR}"
+    sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
+
+    cd "${BUILDDIR}/release-staging"
+    local zip_path="${RELEASES_DIR}/${archive_name}.zip"
+    if command -v zip &> /dev/null; then
+        echo "Creating ${archive_name}.zip ..."
+        zip -rq "${zip_path}" "pic32-toolchain"
+        echo "  [OK] $(du -h "${zip_path}" | cut -f1)"
+        cd "${RELEASES_DIR}"
+        sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
+    fi
+
+    # Copy README to releases dir too
+    cp "${stage_dir}/README.txt" "${RELEASES_DIR}/${archive_name}-README.txt"
+
+    # Show size comparison
+    echo ""
+    echo "Release package contents:"
+    du -sh "${stage_dir}"/* 2>/dev/null || true
+    echo ""
+    local full_size=$(du -sh "${PREFIX}" | cut -f1)
+    local release_size=$(du -sh "${stage_dir}" | cut -f1)
+    echo "Size comparison:"
+    echo "  Full build:     ${full_size}"
+    echo "  Release package: ${release_size}"
+
+    # Cleanup staging
+    # rm -rf "${BUILDDIR}/release-staging"
 
     cd "${SCRIPT_DIR}"
 }
@@ -981,7 +1168,7 @@ print_summary() {
     echo "  Newlib:   ${NEWLIB_VERSION}"
     echo "  GDB:      ${GDB_VERSION}"
     echo ""
-    echo "Key library directories:"
+    echo "Full build library directories:"
     echo "  ${PREFIX}/${TARGET}/lib/                        - Default (hard-float, big-endian)"
     echo "  ${PREFIX}/${TARGET}/lib/el/mips32r2/            - PIC32MZ EF (hard-float, little-endian)"
     echo "  ${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2/ - PIC32MZ DA (soft-float, little-endian)"
@@ -991,9 +1178,19 @@ print_summary() {
     "${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib
     echo ""
 
-    echo "Usage examples:"
+    echo "Usage with full toolchain (${TARGET}-*):"
     echo "  PIC32MZ EF: ${TARGET}-gcc -march=mips32r2 -EL ..."
     echo "  PIC32MZ DA: ${TARGET}-gcc -march=mips32r2 -msoft-float -EL ..."
+    echo ""
+
+    if [ -d "${RELEASES_DIR}" ]; then
+        echo "Release package created with pic32-* tool names:"
+        echo "  PIC32MZ EF: pic32-gcc -march=mips32r2 -EL ..."
+        echo "  PIC32MZ DA: pic32-gcc -march=mips32r2 -msoft-float -EL ..."
+        echo ""
+        echo "Release archives in: ${RELEASES_DIR}/"
+        ls -la "${RELEASES_DIR}"/*.tar.xz "${RELEASES_DIR}"/*.zip 2>/dev/null || true
+    fi
 }
 
 #-----------------------------------------------------------------------------

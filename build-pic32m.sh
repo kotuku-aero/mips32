@@ -564,7 +564,7 @@ build_newlib() {
 
     # Verify that GCC stage1 has multilib support before proceeding
     echo "Checking GCC multilib configuration..."
-    local multilib_output=$("${PREFIX}/bin/${TOOLCHAIN}-gcc" -print-multi-lib 2>/dev/null)
+    local multilib_output=$("${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib 2>/dev/null)
     echo "GCC reports multilib variants:"
     echo "${multilib_output}"
     echo ""

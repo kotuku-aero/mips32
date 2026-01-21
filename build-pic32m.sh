@@ -459,7 +459,6 @@ build_binutils() {
     "${SCRIPT_DIR}/binutils/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
-        --program-prefix=${TOOLCHAIN} \
         --disable-nls \
         --disable-shared \
         --disable-werror
@@ -647,9 +646,6 @@ build_gcc_stage2() {
     fi
 
     log "Building GCC ${GCC_VERSION} Stage 2 (with newlib and multilib support)"
-
-    # GCC needs to find binutils and stage1 compiler
-    export PATH="${PREFIX}/bin:${PATH}"
 
     # CRITICAL: Clean any previous build directory to ensure fresh configure
     # Stage2 must also pick up the multilib configuration
@@ -1055,6 +1051,11 @@ main() {
     build_mpc
     build_binutils
     build_gcc_stage1
+
+
+    # GCC needs to find binutils and stage1 compiler
+    export PATH="${PREFIX}/bin:${PATH}"
+
     build_newlib
     build_gcc_stage2
     build_gdb

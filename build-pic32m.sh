@@ -624,7 +624,7 @@ build_newlib() {
     echo "========================================="
     echo "Verifying installed multilib libraries..."
     echo "========================================="
-    for dir in "${PREFIX}/${TARGET}/lib/soft-float/eb" "${PREFIX}/${TARGET}/lib/soft-float/el" "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el"; do
+    for dir in "${PREFIX}/${TARGET}/lib/el/mips32r2" "${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2"; do
         if [ -d "$dir" ]; then
             echo "  [OK] ${dir}"
             ls -la "$dir"/*.a 2>/dev/null | head -3
@@ -726,7 +726,6 @@ build_gdb() {
     local gdb_opts=(
         --prefix="${PREFIX}"
         --target="${TARGET}"
-        --program-prefix=${TOOLCHAIN} \
         --disable-nls
         --disable-shared
         --disable-werror

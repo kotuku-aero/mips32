@@ -3,20 +3,23 @@
 # build-pic32m.sh - Build MIPS32 cross-compiler toolchain for PIC32
 #
 # This script builds a complete cross-compiler toolchain targeting
-# ${TARGET} (PIC32) processors with MULTILIB support for hard-float FP64.
+# mipsisa32r2-elf (PIC32) processors with full MULTILIB support.
 # It produces native Windows executables when run under MSYS2 UCRT64.
 #
 # MULTILIB SUPPORT:
-#   This version builds multiple library variants:
-#   - soft-float/eb (big-endian soft-float) - default
-#   - soft-float/el (little-endian soft-float) - for PIC32MX/MK
-#   - hard-float/mfp64/el (little-endian hard-float FP64) - FOR PIC32MZ-EF
+#   Built with --with-float=hard, the toolchain provides these variants:
+#   - . (root)              - hard-float, big-endian (default)
+#   - el/mips32r2           - hard-float, little-endian, mips32r2 (PIC32MZ EF)
+#   - soft-float/el/mips32r2 - soft-float, little-endian, mips32r2 (PIC32MZ DA)
+#   - Plus many other architecture/endian/float combinations
+#
+#   Use: mipsisa32r2-elf-gcc -print-multi-lib to see all variants
 #
 # The script automatically tracks completed stages and resumes from
 # the last successful stage on re-run.
 #
 # Environment variables:
-#   PREFIX      - Installation prefix (default: /c/pic32)
+#   PREFIX      - Installation prefix (default: /c/pic32/mipsisa32r2-elf)
 #   JOBS        - Parallel build jobs (default: nproc)
 #   GDB_PYTHON  - Enable Python in GDB: yes/no (default: no)
 #   CLEAN       - Clean build directory first: yes/no (default: no)
@@ -36,7 +39,7 @@
 set -e  # Exit on error
 
 #-----------------------------------------------------------------------------
-# Source Versions - GCC 14.2.0 for better hard-float multilib support
+# Source Versions - GCC 14.2.0 for multilib support
 #-----------------------------------------------------------------------------
 
 GMP_VERSION="6.3.0"
@@ -510,9 +513,8 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
     mkdir -p "${BUILDDIR}/gcc-stage1"
     cd "${BUILDDIR}/gcc-stage1"
 
-    # GCC 14 configuration for hard-float multilib
-    # For MIPS, FP64 is controlled via multilib flags (-mfp64) in t-elf,
-    # not via configure options. --with-float=hard sets the default.
+    # GCC configuration with --with-float=hard
+    # Hard-float becomes the default; soft-float is a multilib variant
     "${SCRIPT_DIR}/gcc/configure" \
         --prefix="${PREFIX}" \
         --target="${TARGET}" \
@@ -526,7 +528,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --disable-libgomp \
         --disable-libatomic \
         --with-newlib \
-        --with-arch=m14k \
+        --with-arch=mips32r2 \
         --without-headers \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
@@ -566,16 +568,21 @@ build_newlib() {
     # Verify that GCC stage1 has multilib support before proceeding
     echo "Checking GCC multilib configuration..."
     local multilib_output=$("${PREFIX}/bin/${TOOLCHAIN}-gcc" -print-multi-lib 2>/dev/null)
-    echo "GCC reports multilib: ${multilib_output}"
+    echo "GCC reports multilib variants:"
+    echo "${multilib_output}"
+    echo ""
 
-    if [ "${multilib_output}" = ".;" ]; then
+    # Check for more than just the default variant
+    local variant_count=$(echo "${multilib_output}" | wc -l)
+    if [ "${variant_count}" -lt 2 ]; then
         echo ""
         echo "ERROR: GCC stage1 does not have multilib support!"
-        echo "This usually means the t-elf patch was not applied before GCC configure."
+        echo "Expected multiple variants but only found: ${multilib_output}"
         echo "Please run: CLEAN=yes ./build-pic32m.sh to start fresh."
         echo ""
         exit 1
     fi
+    echo "Found ${variant_count} multilib variants - OK"
 
     # CRITICAL: Clean any previous build directory to ensure fresh configure
     if [ -d "${BUILDDIR}/newlib" ]; then
@@ -619,19 +626,13 @@ build_newlib() {
     make -j2
     make install
 
-    # Verify multilib libraries were installed
+    # Show installed library directories
     echo ""
     echo "========================================="
-    echo "Verifying installed multilib libraries..."
+    echo "Installed newlib multilib directories:"
     echo "========================================="
-    for dir in "${PREFIX}/${TARGET}/lib/el/mips32r2" "${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2"; do
-        if [ -d "$dir" ]; then
-            echo "  [OK] ${dir}"
-            ls -la "$dir"/*.a 2>/dev/null | head -3
-        else
-            echo "  [MISSING] ${dir}"
-        fi
-    done
+    echo "Contents of ${PREFIX}/${TARGET}/lib:"
+    ls -la "${PREFIX}/${TARGET}/lib/" 2>/dev/null | head -20
     echo ""
 
     mark_stage_complete "${stage}"
@@ -669,7 +670,7 @@ build_gcc_stage2() {
         --disable-libquadmath \
         --disable-libgomp \
         --disable-libatomic \
-        --with-arch=m14k \
+        --with-arch=mips32r2 \
         --with-newlib \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
@@ -685,21 +686,13 @@ build_gcc_stage2() {
     make -j2 all-target-libgcc
     make install-target-libgcc
 
-    # Verify libgcc multilib
+    # Show installed libgcc directories
     echo ""
     echo "========================================="
-    echo "Verifying libgcc multilib installation..."
+    echo "Installed libgcc multilib directories:"
     echo "========================================="
-    for dir in "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/soft-float/eb" \
-               "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/soft-float/el" \
-               "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/hard-float/mfp64/el"; do
-        if [ -d "$dir" ]; then
-            echo "  [OK] ${dir}"
-            ls -la "$dir"/libgcc.a 2>/dev/null || echo "       (no libgcc.a)"
-        else
-            echo "  [MISSING] ${dir}"
-        fi
-    done
+    echo "Contents of ${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}:"
+    ls -la "${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}/" 2>/dev/null | head -20
     echo ""
 
     mark_stage_complete "${stage}"
@@ -848,31 +841,27 @@ verify_build() {
     echo ""
     echo "Checking newlib libraries..."
     
-    # Check soft-float variants
-    if [ -f "${PREFIX}/${TARGET}/lib/soft-float/eb/libc.a" ]; then
-        echo "[OK] newlib soft-float big-endian (soft-float/eb/libc.a)"
+    # Check for PIC32MZ EF variant (hard-float, little-endian, mips32r2)
+    if [ -f "${PREFIX}/${TARGET}/lib/el/mips32r2/libc.a" ]; then
+        echo "[OK] newlib for PIC32MZ EF (el/mips32r2/libc.a) - hard-float, little-endian"
     else
-        echo "[MISSING] newlib soft-float big-endian"
+        echo "[MISSING] newlib for PIC32MZ EF (el/mips32r2/libc.a)"
         all_ok=false
     fi
 
-    if [ -f "${PREFIX}/${TARGET}/lib/soft-float/el/libc.a" ]; then
-        echo "[OK] newlib soft-float little-endian (soft-float/el/libc.a)"
+    # Check for PIC32MZ DA variant (soft-float, little-endian, mips32r2)
+    if [ -f "${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2/libc.a" ]; then
+        echo "[OK] newlib for PIC32MZ DA (soft-float/el/mips32r2/libc.a) - soft-float, little-endian"
     else
-        echo "[MISSING] newlib soft-float little-endian"
+        echo "[MISSING] newlib for PIC32MZ DA (soft-float/el/mips32r2/libc.a)"
         all_ok=false
     fi
 
-    # Check hard-float FP64 variant (PIC32MZ-EF) - THE CRITICAL ONE
-    if [ -f "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" ]; then
-        echo "[OK] newlib hard-float FP64 (hard-float/mfp64/el/libc.a) - PIC32MZ-EF ✓✓✓"
-        
-        if command -v ${TARGET}-objdump &> /dev/null; then
-            local flags=$(${TARGET}-objdump -p "${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/libc.a" 2>/dev/null | grep -i "flags" | head -1)
-            echo "     Library ABI: ${flags}"
-        fi
+    # Check default library
+    if [ -f "${PREFIX}/${TARGET}/lib/libc.a" ]; then
+        echo "[OK] newlib default (lib/libc.a) - hard-float, big-endian"
     else
-        echo "[MISSING] newlib hard-float FP64 (hard-float/mfp64/el/libc.a) - REQUIRED FOR PIC32MZ-EF!"
+        echo "[MISSING] newlib default (lib/libc.a)"
         all_ok=false
     fi
 
@@ -886,18 +875,19 @@ verify_build() {
 
     if [ "$all_ok" = true ]; then
         echo "========================================="
-        echo "✓✓✓ SUCCESS! All tools and libraries built!"
+        echo "SUCCESS! All tools and libraries built!"
         echo "========================================="
         echo ""
-        echo "To use with PIC32MZ-EF, compile with:"
-        echo "  ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ..."
+        echo "PIC32MZ EF (hard-float FPU):"
+        echo "  ${TARGET}-gcc -march=mips32r2 -EL ..."
+        echo "  Libraries: ${PREFIX}/${TARGET}/lib/el/mips32r2/"
         echo ""
-        echo "Libraries will be automatically selected from:"
-        echo "  ${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/"
+        echo "PIC32MZ DA (soft-float):"
+        echo "  ${TARGET}-gcc -march=mips32r2 -msoft-float -EL ..."
+        echo "  Libraries: ${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2/"
         echo ""
-        echo "No more ABI mismatch warnings! 🎉"
     else
-        echo "✗ Some tools or libraries are missing - check build log for errors"
+        echo "Some tools or libraries are missing - check build log for errors"
         return 1
     fi
 }
@@ -955,15 +945,21 @@ Component Versions:
   Newlib:   ${NEWLIB_VERSION}
   GDB:      ${GDB_VERSION}
 
-Multilib Variants:
-  - soft-float/eb (default, big-endian)
-  - soft-float/el (little-endian) - for PIC32MX, PIC32MK
-  - hard-float/mfp64/el (hard-float FP64) - for PIC32MZ-EF
+Multilib Support:
+  Built with --with-float=hard, hard-float is the default.
+  Use: ${TARGET}-gcc -print-multi-lib to see all variants.
 
-Usage for PIC32MZ-EF:
-  ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ...
-  
-  Libraries automatically selected from: lib/hard-float/mfp64/el/
+  Key variants for PIC32:
+  - el/mips32r2           : PIC32MZ EF (hard-float, little-endian)
+  - soft-float/el/mips32r2: PIC32MZ DA (soft-float, little-endian)
+
+Usage Examples:
+
+  PIC32MZ EF (has hardware FPU):
+    ${TARGET}-gcc -march=mips32r2 -EL -c main.c
+
+  PIC32MZ DA (no hardware FPU):
+    ${TARGET}-gcc -march=mips32r2 -msoft-float -EL -c main.c
 
 Built with: $(gcc --version | head -1)
 EOF
@@ -975,7 +971,9 @@ print_summary() {
     log "Build Complete"
 
     echo "Toolchain installed to: ${PREFIX}"
-    echo "Windows path: $(cygpath -w "${PREFIX}")"
+    if command -v cygpath &> /dev/null; then
+        echo "Windows path: $(cygpath -w "${PREFIX}")"
+    fi
     echo ""
     echo "Component versions:"
     echo "  GCC:      ${GCC_VERSION}"
@@ -983,19 +981,19 @@ print_summary() {
     echo "  Newlib:   ${NEWLIB_VERSION}"
     echo "  GDB:      ${GDB_VERSION}"
     echo ""
-    echo "Library directories:"
-    echo "  ${PREFIX}/${TARGET}/lib/soft-float/eb/         - Default (soft-float big-endian)"
-    echo "  ${PREFIX}/${TARGET}/lib/soft-float/el/         - Little-endian soft-float"
-    echo "  ${PREFIX}/${TARGET}/lib/hard-float/mfp64/el/   - Hard-float FP64 (PIC32MZ-EF) ✓"
+    echo "Key library directories:"
+    echo "  ${PREFIX}/${TARGET}/lib/                        - Default (hard-float, big-endian)"
+    echo "  ${PREFIX}/${TARGET}/lib/el/mips32r2/            - PIC32MZ EF (hard-float, little-endian)"
+    echo "  ${PREFIX}/${TARGET}/lib/soft-float/el/mips32r2/ - PIC32MZ DA (soft-float, little-endian)"
     echo ""
 
     echo "Multilib configuration:"
     "${PREFIX}/bin/${TARGET}-gcc" -print-multi-lib
     echo ""
 
-    echo "For PIC32MZ-EF projects:"
-    echo "  Compile: ${TARGET}-gcc -march=m14k -mhard-float -mfp64 -EL ..."
-    echo "  Result:  No more ABI mismatch warnings! 🎉"
+    echo "Usage examples:"
+    echo "  PIC32MZ EF: ${TARGET}-gcc -march=mips32r2 -EL ..."
+    echo "  PIC32MZ DA: ${TARGET}-gcc -march=mips32r2 -msoft-float -EL ..."
 }
 
 #-----------------------------------------------------------------------------
@@ -1007,13 +1005,11 @@ main() {
     echo "MIPS32 Toolchain Builder - PIC32 MULTILIB"
     echo "========================================="
     echo ""
-    echo "This build includes hard-float FP64 support for PIC32MZ-EF"
-    echo ""
     echo "Configuration:"
     echo "  TARGET:       ${TARGET}"
     echo "  PREFIX:       ${PREFIX}"
     echo "  JOBS:         ${JOBS}"
-    echo "  MULTILIB:     3 variants (soft-float/eb, soft-float/el, hard-float/mfp64/el)"
+    echo "  MULTILIB:     Full support (hard-float default)"
     echo ""
 
     check_prerequisites
@@ -1023,7 +1019,7 @@ main() {
         rm -rf "${BUILDDIR}"
         # Also remove GCC source directory to ensure fresh config.gcc patching
         rm -rf "${SCRIPT_DIR}/gcc"
-        echo "Removed build directory, prefix, and gcc source directory"
+        echo "Removed build directory and gcc source directory"
     fi
 
     mkdir -p "${BUILDDIR}"

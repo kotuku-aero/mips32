@@ -499,7 +499,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
     fi
 
     # GCC needs to find the newly built binutils
-    export PATH="${PREFIX}/bin:${PATH}"
+    # export PATH="${PREFIX}/bin:${PATH}"
 
     # CRITICAL: Clean any previous build directory to ensure fresh configure
     # This is necessary because multilib configuration is cached during configure
@@ -536,6 +536,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --enable-multilib
 
     make -j${JOBS} all-gcc
+
     make install-gcc
 
     # Verify multilib configuration

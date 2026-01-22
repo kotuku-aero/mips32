@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# build-pic32m.sh - Build MIPS32 cross-compiler toolchain for PIC32
+# build-mipsisa32.sh - Build MIPS32 cross-compiler toolchain for PIC32
 #
 # This script builds a complete cross-compiler toolchain targeting
 # mipsisa32r2-elf (PIC32) processors with full MULTILIB support.
@@ -29,11 +29,11 @@
 #   MAKE_RELEASE - Create release archive: yes/no (default: yes)
 #
 # Usage:
-#   ./build-pic32m.sh                    # Standard build (resumes if interrupted)
-#   PREFIX=/c/my-tools ./build-pic32m.sh # Custom prefix
-#   GDB_PYTHON=yes ./build-pic32m.sh     # With Python support
-#   CLEAN=yes ./build-pic32m.sh          # Clean build (starts from scratch)
-#   MAKE_RELEASE=no ./build-pic32m.sh    # Skip release archive creation
+#   ./build-mipsisa32.sh                    # Standard build (resumes if interrupted)
+#   PREFIX=/c/my-tools ./build-mipsisa32.sh # Custom prefix
+#   GDB_PYTHON=yes ./build-mipsisa32.sh     # With Python support
+#   CLEAN=yes ./build-mipsisa32.sh          # Clean build (starts from scratch)
+#   MAKE_RELEASE=no ./build-mipsisa32.sh    # Skip release archive creation
 #
 
 set -e  # Exit on error
@@ -575,7 +575,7 @@ build_newlib() {
         echo ""
         echo "ERROR: GCC stage1 does not have multilib support!"
         echo "Expected multiple variants but only found: ${multilib_output}"
-        echo "Please run: CLEAN=yes ./build-pic32m.sh to start fresh."
+        echo "Please run: CLEAN=yes ./build-mipsisa32.sh to start fresh."
         echo ""
         exit 1
     fi
@@ -895,7 +895,7 @@ create_release_archive() {
         return 0
     fi
 
-    log "Creating PIC32 release package"
+    log "Creating release package"
 
     mkdir -p "${RELEASES_DIR}"
 
@@ -906,174 +906,12 @@ create_release_archive() {
         exe_suffix=""
     fi
 
-    local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
-    local build_archive_name="mipsisa32r2-${TOOLCHAIN_VERSION}-${platform}"
-    local stage_dir="${BUILDDIR}/release-staging/pic32-toolchain"
-
-    # Clean and create staging directory
-    rm -rf "${BUILDDIR}/release-staging"
-    mkdir -p "${stage_dir}/bin"
-    mkdir -p "${stage_dir}/pic32/lib"
-    mkdir -p "${stage_dir}/lib/gcc/pic32/${GCC_VERSION}"
-
-    echo "Staging PIC32-specific release package..."
-
-    # =========================================================================
-    # 1. Copy and rename executables from mipsisa32r2-elf-* to pic32-*
-    # =========================================================================
-    echo "Copying and renaming executables..."
-    
-    local tools=(
-        "gcc"
-        "g++"
-        "cpp"
-        "as"
-        "ld"
-        "ld.bfd"
-        "ar"
-        "nm"
-        "objcopy"
-        "objdump"
-        "ranlib"
-        "readelf"
-        "size"
-        "strings"
-        "strip"
-        "addr2line"
-        "c++filt"
-        "elfedit"
-        "gprof"
-        "gdb"
-        "run"
-    )
-
-    for tool in "${tools[@]}"; do
-        local src="${PREFIX}/bin/${TARGET}-${tool}${exe_suffix}"
-        local dst="${stage_dir}/bin/pic32-${tool}${exe_suffix}"
-        if [ -f "$src" ]; then
-            cp "$src" "$dst"
-            echo "  [OK] pic32-${tool}"
-        fi
-    done
-
-    # Also copy gcc/g++ without prefix for convenience
-    if [ -f "${PREFIX}/bin/${TARGET}-gcc${exe_suffix}" ]; then
-        cp "${PREFIX}/bin/${TARGET}-gcc${exe_suffix}" "${stage_dir}/bin/pic32-gcc${exe_suffix}"
-    fi
-
-    # Copy cc1, cc1plus, collect2, lto1, lto-wrapper from libexec
-    echo "Copying compiler support executables..."
-    local libexec_src="${PREFIX}/libexec/gcc/${TARGET}/${GCC_VERSION}"
-    local libexec_dst="${stage_dir}/libexec/gcc/pic32/${GCC_VERSION}"
-    if [ -d "$libexec_src" ]; then
-        mkdir -p "$libexec_dst"
-        for exe in cc1 cc1plus collect2 lto1 lto-wrapper liblto_plugin*; do
-            if [ -f "${libexec_src}/${exe}${exe_suffix}" ] || [ -f "${libexec_src}/${exe}" ]; then
-                cp "${libexec_src}/${exe}"* "$libexec_dst/" 2>/dev/null || true
-            fi
-        done
-        # Copy any .dll files in libexec
-        cp "${libexec_src}"/*.dll "$libexec_dst/" 2>/dev/null || true
-        echo "  [OK] libexec/gcc/pic32/${GCC_VERSION}/"
-    fi
-
-    # Copy runtime DLLs
-    echo "Copying runtime DLLs..."
-    cp "${PREFIX}/bin"/*.dll "${stage_dir}/bin/" 2>/dev/null || true
-
-    # =========================================================================
-    # 2. Copy only PIC32-relevant libraries (little-endian mips32r2)
-    # =========================================================================
-    echo "Copying PIC32-specific libraries..."
-
-    # Newlib libraries - only el/mips32r2 variants
-    local newlib_src="${PREFIX}/${TARGET}/lib"
-    local newlib_dst="${stage_dir}/pic32/lib"
-
-    # Hard-float little-endian mips32r2 (PIC32MZ EF) - this is the primary target
-    if [ -d "${newlib_src}/el/mips32r2" ]; then
-        mkdir -p "${newlib_dst}/el/mips32r2"
-        cp "${newlib_src}/el/mips32r2"/*.a "${newlib_dst}/el/mips32r2/"
-        echo "  [OK] pic32/lib/el/mips32r2/ (PIC32MZ EF - hard-float)"
-    fi
-
-    # Soft-float little-endian mips32r2 (PIC32MZ DA)
-    if [ -d "${newlib_src}/soft-float/el/mips32r2" ]; then
-        mkdir -p "${newlib_dst}/soft-float/el/mips32r2"
-        cp "${newlib_src}/soft-float/el/mips32r2"/*.a "${newlib_dst}/soft-float/el/mips32r2/"
-        echo "  [OK] pic32/lib/soft-float/el/mips32r2/ (PIC32MZ DA - soft-float)"
-    fi
-
-    # Copy include files
-    if [ -d "${PREFIX}/${TARGET}/include" ]; then
-        cp -r "${PREFIX}/${TARGET}/include" "${stage_dir}/pic32/"
-        echo "  [OK] pic32/include/"
-    fi
-
-    # =========================================================================
-    # 3. Copy GCC libraries (libgcc) - only el/mips32r2 variants
-    # =========================================================================
-    echo "Copying GCC support libraries..."
-
-    local gcc_lib_src="${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}"
-    local gcc_lib_dst="${stage_dir}/lib/gcc/pic32/${GCC_VERSION}"
-
-    # Hard-float little-endian mips32r2
-    if [ -d "${gcc_lib_src}/el/mips32r2" ]; then
-        mkdir -p "${gcc_lib_dst}/el/mips32r2"
-        cp "${gcc_lib_src}/el/mips32r2"/*.a "${gcc_lib_dst}/el/mips32r2/" 2>/dev/null || true
-        cp "${gcc_lib_src}/el/mips32r2"/*.o "${gcc_lib_dst}/el/mips32r2/" 2>/dev/null || true
-        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/el/mips32r2/"
-    fi
-
-    # Soft-float little-endian mips32r2
-    if [ -d "${gcc_lib_src}/soft-float/el/mips32r2" ]; then
-        mkdir -p "${gcc_lib_dst}/soft-float/el/mips32r2"
-        cp "${gcc_lib_src}/soft-float/el/mips32r2"/*.a "${gcc_lib_dst}/soft-float/el/mips32r2/" 2>/dev/null || true
-        cp "${gcc_lib_src}/soft-float/el/mips32r2"/*.o "${gcc_lib_dst}/soft-float/el/mips32r2/" 2>/dev/null || true
-        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/soft-float/el/mips32r2/"
-    fi
-
-    # Copy GCC include files and plugin headers
-    if [ -d "${gcc_lib_src}/include" ]; then
-        cp -r "${gcc_lib_src}/include" "${gcc_lib_dst}/"
-        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/include/"
-    fi
-    if [ -d "${gcc_lib_src}/include-fixed" ]; then
-        cp -r "${gcc_lib_src}/include-fixed" "${gcc_lib_dst}/"
-        echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/include-fixed/"
-    fi
-    if [ -d "${gcc_lib_src}/install-tools" ]; then
-        cp -r "${gcc_lib_src}/install-tools" "${gcc_lib_dst}/"
-    fi
-
-    # =========================================================================
-    # 4. Copy linker scripts
-    # =========================================================================
-    if [ -d "${PREFIX}/${TARGET}/lib/ldscripts" ]; then
-        cp -r "${PREFIX}/${TARGET}/lib/ldscripts" "${newlib_dst}/"
-        echo "  [OK] pic32/lib/ldscripts/"
-    fi
-
-    # =========================================================================
-    # 5. Create GCC spec file to use pic32 paths
-    # =========================================================================
-    echo "Creating GCC specs for pic32 paths..."
-    cat > "${gcc_lib_dst}/specs" << 'SPECS'
-*cross_compile:
-1
-
-*multilib_defaults:
-EL mips32r2
-
-SPECS
-    echo "  [OK] lib/gcc/pic32/${GCC_VERSION}/specs"
-
+    local archive_name="mipsisa32r2-${TOOLCHAIN_VERSION}-${platform}"
     # =========================================================================
     # 6. Create README
     # =========================================================================
-    cat > "${stage_dir}/README.txt" << EOF
-PIC32 Toolchain ${TOOLCHAIN_VERSION}
+    cat > "${RELEASES_DIR}/README.txt" << EOF
+mipsisa32r2 Toolchain ${TOOLCHAIN_VERSION}
 ==========================================
 
 Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -1085,95 +923,32 @@ Component Versions:
   Newlib:   ${NEWLIB_VERSION}
   GDB:      ${GDB_VERSION}
 
-This is a streamlined release containing only the libraries needed for
-PIC32MZ processors. Tools have been renamed from mipsisa32r2-elf-* to pic32-*.
-
-Included Library Variants:
-  - el/mips32r2           : PIC32MZ EF (hard-float, little-endian)
-  - soft-float/el/mips32r2: PIC32MZ DA (soft-float, little-endian)
-
-Usage Examples:
-
-  PIC32MZ EF (has hardware FPU):
-    pic32-gcc -march=mips32r2 -EL -c main.c
-
-  PIC32MZ DA (no hardware FPU):
-    pic32-gcc -march=mips32r2 -msoft-float -EL -c main.c
-
-Tools Included:
-  pic32-gcc, pic32-g++, pic32-as, pic32-ld, pic32-objcopy,
-  pic32-objdump, pic32-gdb, pic32-ar, pic32-nm, pic32-strip, etc.
-
 Source: https://github.com/kotuku-aero/mips32
 License: GPL v3 (GCC, Binutils, GDB), BSD/MIT (Newlib)
 
 Built with: $(gcc --version | head -1)
 
-The archives mipsisa32-elf-win64.tar.xz and mipsisa32-elf-win64.zip are the generated
-mips compilers and libraries without any renaming of the tools to pic32.  Also all
-multilib variants are included.
 EOF
 
-    # =========================================================================
-    # 7. Create archives
-    # =========================================================================
     echo ""
     echo "Creating release archives..."
-    cd "${BUILDDIR}/release-staging"
 
     local tarxz_path="${RELEASES_DIR}/${archive_name}.tar.xz"
     echo "Creating ${archive_name}.tar.xz ..."
-    tar -cJf "${tarxz_path}" "pic32-toolchain"
+    tar -cJf "${tarxz_path}" $PREFIX
     echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
 
     cd "${RELEASES_DIR}"
     sha256sum "${archive_name}.tar.xz" > "${archive_name}.tar.xz.sha256"
 
-    cd "${BUILDDIR}/release-staging"
     local zip_path="${RELEASES_DIR}/${archive_name}.zip"
     if command -v zip &> /dev/null; then
         echo "Creating ${archive_name}.zip ..."
-        zip -rq "${zip_path}" "pic32-toolchain"
+        zip -rq "${zip_path}" $PREFIX
         echo "  [OK] $(du -h "${zip_path}" | cut -f1)"
         cd "${RELEASES_DIR}"
         sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
     fi
-
-    # copy the actual build to the archive as well
-    local build_tarxz_path="${RELEASES_DIR}/${build_archive_name}.tar.xz"
-    echo "Creating ${build_archive_name}.tar.xz ..."
-    tar -cJf "${build_tarxz_path}" $PREFIX
-    echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
-
-    cd "${RELEASES_DIR}"
-    sha256sum "${build_archive_name}.tar.xz" > "${build_archive_name}.tar.xz.sha256"
-
-    cd "${BUILDDIR}/release-staging"
-    local build_zip_path="${RELEASES_DIR}/${build_archive_name}.zip"
-    if command -v zip &> /dev/null; then
-        echo "Creating ${build_archive_name}.zip ..."
-        zip -rq "${build_zip_path}" $PREFIX
-        echo "  [OK] $(du -h "${build_zip_path}" | cut -f1)"
-        cd "${RELEASES_DIR}"
-        sha256sum "${build_archive_name}.zip" > "${build_archive_name}.zip.sha256"
-    fi
-
-    # Copy README to releases dir too
-    cp "${stage_dir}/README.txt" "${RELEASES_DIR}/${archive_name}-README.txt"
-
-    # Show size comparison
-    echo ""
-    echo "Release package contents:"
-    du -sh "${stage_dir}"/* 2>/dev/null || true
-    echo ""
-    local full_size=$(du -sh "${PREFIX}" | cut -f1)
-    local release_size=$(du -sh "${stage_dir}" | cut -f1)
-    echo "Size comparison:"
-    echo "  Full build:     ${full_size}"
-    echo "  Release package: ${release_size}"
-
-    # Cleanup staging
-    # rm -rf "${BUILDDIR}/release-staging"
 
     cd "${SCRIPT_DIR}"
 }

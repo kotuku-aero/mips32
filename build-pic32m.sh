@@ -907,6 +907,7 @@ create_release_archive() {
     fi
 
     local archive_name="pic32-toolchain-${TOOLCHAIN_VERSION}-${platform}"
+    local build_archive_name="mipsisa32r2-${TOOLCHAIN_VERSION}-${platform}"
     local stage_dir="${BUILDDIR}/release-staging/pic32-toolchain"
 
     # Clean and create staging directory
@@ -1103,10 +1104,14 @@ Tools Included:
   pic32-gcc, pic32-g++, pic32-as, pic32-ld, pic32-objcopy,
   pic32-objdump, pic32-gdb, pic32-ar, pic32-nm, pic32-strip, etc.
 
-Source: https://github.com/user/pic32-toolchain (update with actual URL)
+Source: https://github.com/kotuku-aero/mips32
 License: GPL v3 (GCC, Binutils, GDB), BSD/MIT (Newlib)
 
 Built with: $(gcc --version | head -1)
+
+The archives mipsisa32-elf-win64.tar.xz and mipsisa32-elf-win64.zip are the generated
+mips compilers and libraries without any renaming of the tools to pic32.  Also all
+multilib variants are included.
 EOF
 
     # =========================================================================
@@ -1132,6 +1137,25 @@ EOF
         echo "  [OK] $(du -h "${zip_path}" | cut -f1)"
         cd "${RELEASES_DIR}"
         sha256sum "${archive_name}.zip" > "${archive_name}.zip.sha256"
+    fi
+
+    # copy the actual build to the archive as well
+    local build_tarxz_path="${RELEASES_DIR}/${build_archive_name}.tar.xz"
+    echo "Creating ${build_archive_name}.tar.xz ..."
+    tar -cJf "${build_tarxz_path}" $PREFIX
+    echo "  [OK] $(du -h "${tarxz_path}" | cut -f1)"
+
+    cd "${RELEASES_DIR}"
+    sha256sum "${build_archive_name}.tar.xz" > "${build_archive_name}.tar.xz.sha256"
+
+    cd "${BUILDDIR}/release-staging"
+    local build_zip_path="${RELEASES_DIR}/${build_archive_name}.zip"
+    if command -v zip &> /dev/null; then
+        echo "Creating ${build_archive_name}.zip ..."
+        zip -rq "${build_zip_path}" $PREFIX
+        echo "  [OK] $(du -h "${build_zip_path}" | cut -f1)"
+        cd "${RELEASES_DIR}"
+        sha256sum "${build_archive_name}.zip" > "${build_archive_name}.zip.sha256"
     fi
 
     # Copy README to releases dir too

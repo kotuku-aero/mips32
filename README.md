@@ -469,5 +469,6 @@ Contributions welcome! Please:
 
 ## Related Projects
 
-- [CanFly](https://github.com/user/canfly) - Open-source avionics for experimental aircraft (uses this toolchain)
+- [diy-efis](https://github.com/kotuku-aero/diy-efis) - Open-source avionics for experimental aircraft (uses this toolchain)
+- [pic32](https://github.com/kotuku-aero/pic32) - CMake based library pic32 that includes toolchain definitions and support libraries.  Uses newlib not proprietary libraries like xc32
 - [Microchip XC32](https://www.microchip.com/xc32) - Official (proprietary) compiler

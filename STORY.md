@@ -193,4 +193,171 @@ The toolchain is self-contained and portable. Extract to `C:\pic32`, add `bin` t
 
 ---
 
+## Addendum: The Final Mile (Week 5 - CLion Integration)
+
+*January 24, 2025*
+
+Having the toolchain built was one thing. Getting a real application to compile and link was another.
+
+### The Reality Check
+
+With the toolchain in place, I turned to my actual application - kMFD3, a multi-function display for aircraft with:
+- 14 XML-generated UI layouts (using custom XSLT tooling)
+- Integration with 7+ internal libraries (neutron, photon, atom, graviton, etc.)
+- Hardware graphics acceleration (nano2d library)
+- USB support
+- Custom memory allocator (neutron_malloc instead of standard malloc)
+- Target: PIC32MZ2064DAR176 (2MB flash, 512KB RAM, no FPU)
+
+The toolchain worked. The application? Not so much.
+
+### The ABI Alignment Crisis
+
+**Error**: Undefined references to `__adddf3`, `__subdf3`, `__muldf3`, `__divdf3`
+
+These are libgcc soft-float helper functions. They should have been automatically linked. Why weren't they?
+
+**Root cause**: Our Microchip library (`libpic32.a`) had been compiled years ago with XC32 using `-mfp64` (hard-float, 64-bit FPU registers). Our new soft-float toolchain expected `-msoft-float` ABIs. The object files were fundamentally incompatible.
+
+**Solution**: Rebuild ALL Microchip-derived libraries from source with the new toolchain:
+```bash
+cd libs/pic32
+./build-mipsisa32.sh
+```
+
+This script compiles the entire PIC32 support infrastructure (crt0.S, initialization code, peripheral libraries) with the correct soft-float ABI. Created `libpic32.a` that's ABI-compatible with our toolchain.
+
+### The Linker Script Mismatch
+
+**Error**: Linking succeeded, but runtime crashes immediately after reset.
+
+**Investigation**: Single-stepping through `crt0.S` (the startup code) revealed it was trying to copy initialized data from flash to RAM using symbols that didn't exist:
+```
+undefined reference to `__data_start`
+undefined reference to `__data_init`
+undefined reference to `__data_end`
+undefined reference to `__ramfunc_begin`
+undefined reference to `__ramfunc_end`
+undefined reference to `__ramfunc_load`
+undefined reference to `__ramfunc_length`
+```
+
+**Root cause**: Our `crt0.S` (from the Microchip Device Family Pack) expects **double-underscore** symbols (`__data_start`), but the Microchip linker scripts provide **single-underscore** symbols (`_data_start`). This is an XC32-ism that was never documented.
+
+Additionally, the Microchip linker scripts don't use `AT>` clauses to load data from flash to RAM - they allocate everything directly in RAM (VMA == LMA). But `crt0.S` has a copy loop that expects to copy data.
+
+**Solution**: Define the missing symbols via linker command line to make the copy loops no-ops:
+```cmake
+target_link_options(kMFD3 PRIVATE
+    -Wl,--defsym=__data_start=0x80000000
+    -Wl,--defsym=__data_init=0x80000000
+    -Wl,--defsym=__data_end=0x80000000
+    -Wl,--defsym=__ramfunc_begin=0
+    -Wl,--defsym=__ramfunc_end=0
+    -Wl,--defsym=__ramfunc_load=0
+    -Wl,--defsym=__ramfunc_length=0
+)
+```
+
+Since `__data_start == __data_end`, the data copy loop executes zero times - which is correct since there's no data to copy from flash.
+
+**Documentation added**: Annotated `crt0.S` with 100+ lines of comments explaining:
+- The boot sequence order (NMI detection → stack setup → BSS clear → data init → main)
+- What each linker symbol means (VMA vs LMA)
+- Why the copy loops might execute zero times
+- How to enable data copying if needed in the future
+- Debugging tips for single-stepping through startup
+
+### The Newlib Syscall Stubs
+
+**Error**: Linking failed with undefined references to POSIX system calls:
+```
+undefined reference to `sbrk`
+undefined reference to `_exit`
+undefined reference to `close`, `read`, `write`, `fstat`, `isatty`, `lseek`
+undefined reference to `kill`, `getpid`
+```
+
+**Root cause**: Newlib expects these POSIX-like functions to be implemented by the platform. Since PIC32 is bare-metal (no OS), we need to provide stub implementations.
+
+**Solution**: Created `newlib_stubs.c` with minimal implementations:
+- `sbrk()` - Calls `panic()` since we use custom allocator
+- `_exit()` - Infinite loop with low-power wait
+- File I/O functions - Return errors (no filesystem)
+- Process functions - Return dummy values (no processes)
+
+**Critical linking order discovery**: The stubs must be linked **after** `libc`, `libm`, and `libgcc`:
+```cmake
+target_link_libraries(kMFD3 PRIVATE
+    # Application libraries first
+    neutron photon atom
+    # Standard libraries
+    c m gcc
+    # Stubs last (to resolve newlib's undefined references)
+    atom  # linked again to provide newlib stubs
+)
+```
+
+### The CLion Experience
+
+Once these issues were resolved, CLion "just worked":
+- CMake integration picked up the toolchain files
+- Code completion understood PIC32-specific headers
+- Debugger (GDB + JLink) connected flawlessly
+- Build times: ~30 seconds incremental, ~2 minutes clean
+- Final binary: 439,789 bytes text + 79,187 bytes data = 518KB total (same size as XC32!)
+
+### What We Learned
+
+1. **ABI compatibility is non-negotiable** - You cannot mix hard-float and soft-float object files
+2. **Linker scripts are full of magic** - Undocumented symbols, vendor-specific assumptions
+3. **Startup code is critical** - One wrong symbol and your chip crashes before `main()`
+4. **Documentation prevents pain** - Annotating `crt0.S` now will save hours of debugging later
+5. **AI assistance shines in integration** - Claude helped identify the double-underscore issue in minutes; it would have taken me days
+
+### The Build That Finally Worked
+
+```
+[3/3] Linking C executable firmware\kMFD3.elf
+   text    data     bss     dec     hex filename
+ 439789   79187   31986  550962   86832 kMFD3.elf
+
+Build finished
+```
+
+After a month of work - from "I need a debugger" to "I have a complete, documented, working toolchain with real application builds" - we're done.
+
+The toolchain is in production. The documentation is comprehensive. The libraries are rebuilt. The application builds cleanly.
+
+And I have my debugger.
+
+---
+
+## Updated Technical Summary
+
+| Component | Version | Status |
+|-----------|---------|--------|
+| GCC | 15.2.0 | ✓ Built, tested |
+| Binutils | 2.44 | ✓ Built, tested |
+| Newlib | 4.5.0 | ✓ Built, integrated |
+| GDB | 16.2 | ✓ Built, tested with JLink |
+| libpic32 | Custom | ✓ Rebuilt for soft-float ABI |
+| CMake | 3.15+ | ✓ Toolchain files working |
+| CLion | 2025.2 | ✓ Full integration |
+| Real Application | kMFD3 | ✓ **Builds successfully** |
+
+**Application complexity**:
+- 14 auto-generated UI layouts from XML
+- 7+ internal libraries
+- Custom RTOS (Atom kernel)
+- Hardware acceleration
+- USB stack
+- Final size: 439KB code + 79KB data + 32KB BSS = **550KB total**
+
+**Build environment**: CLion 2025.2 on Windows 11, MSYS2 UCRT64 for toolchain builds
+
+**Time investment**: 5 weeks from "download XC32 sources" to "production builds in CLion"
+
+---
+
 *This document was written in January 2025 by Peter with assistance from Claude (Anthropic). It may be freely distributed under the terms of the GPL-3.0 license.*

@@ -525,6 +525,7 @@ s/tmp-gi.list gtyp-input.list/tmp-gi-win.list gtyp-input.list/
         --disable-libgomp \
         --disable-libatomic \
         --with-newlib \
+        --with-abi=32 \
         --with-arch=mips32r2 \
         --without-headers \
         --with-gmp="${STAGING}" \
@@ -669,6 +670,7 @@ build_gcc_stage2() {
         --disable-libatomic \
         --with-arch=mips32r2 \
         --with-newlib \
+        --with-abi=32 \
         --with-gmp="${STAGING}" \
         --with-mpfr="${STAGING}" \
         --with-mpc="${STAGING}" \
